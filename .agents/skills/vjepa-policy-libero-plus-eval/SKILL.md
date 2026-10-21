@@ -9,7 +9,7 @@ Read [the Plus guide](../../../examples/libero_plus/README.md). Run commands fro
 
 ## Environment and artifacts
 
-Use the pinned Plus checkout from the guide in its own simulator environment: LIBERO and Plus install the same package/suite names. Keep `LIBERO_CONFIG_PATH` separate too. `prepare.py` checks the revision and classification checksum, writes the isolated config, and verifies the imported benchmark's location. Simulator state loading is tied to the documented Torch version; inspect upstream `weights_only` behavior before upgrading it. Preserve MagickWand for noise tasks.
+Use the pinned Plus checkout from the guide in its own simulator environment: LIBERO and Plus install the same package/suite names. Keep `LIBERO_CONFIG_PATH` separate too. `prepare.py` checks the revision and classification checksum, writes the isolated config, and verifies the imported benchmark's location. Simulator state loading is tied to the documented Torch version; inspect upstream `weights_only` behavior before upgrading it. Preserve MagickWand for noise tasks. Inspect the official ZIP member paths and strip any source-directory prefix before `assets/`; require `assets/textures` and `assets/new_objects` directly under the configured assets root before generating the manifest.
 
 Keep the policy environment separate. Use the LIBERO-trained checkpoint and its matching encoder and normalization statistics. Do not fine-tune on Plus tasks. Generate the full task manifest in the simulator environment, then the text cache in the policy environment, using the run's T5 snapshot and context length 128.
 

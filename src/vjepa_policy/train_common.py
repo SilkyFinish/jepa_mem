@@ -179,6 +179,8 @@ def add_common_args(p):
     p.add_argument("--weight-decay", type=float, default=0.04)
     p.add_argument("--num-epochs", type=int, default=10)
     p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--stop-at", default=None, help="Save and stop at an ISO 8601 time with timezone.")
+    p.add_argument("--stop-file", default=None, help="Save and stop when this file exists.")
     p.add_argument("--gradient-accumulation-steps", type=int, default=1)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--mixed-precision", default="bf16", choices=["no", "fp16", "bf16"])
@@ -187,6 +189,8 @@ def add_common_args(p):
     p.add_argument("--loss-exp", type=float, default=1.0)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=1000)
+    p.add_argument("--save-initial-checkpoint", action="store_true",
+                   help="Save step-zero weights for a matched untrained baseline.")
     p.add_argument("--wandb-project", default="vjepa_policy")
     p.add_argument("--wandb-name", default=None)
     return p
@@ -459,6 +463,8 @@ def run_training(args, model, dataset, collator):
             "weight_decay": args.weight_decay,
             "num_epochs": args.num_epochs,
             "max_steps": args.max_steps,
+            "stop_at": args.stop_at,
+            "stop_file": args.stop_file,
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "max_grad_norm": args.max_grad_norm,
             "mixed_precision": args.mixed_precision,
@@ -473,4 +479,7 @@ def run_training(args, model, dataset, collator):
             "data_seed": args.seed,
         },
     )
+    if getattr(args, "save_initial_checkpoint", False) and not args.resume:
+        trainer._save()
+        trainer.accelerator.wait_for_everyone()
     trainer.train()

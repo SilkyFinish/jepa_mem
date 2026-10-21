@@ -25,9 +25,19 @@ Copy the relevant `configs/*.env` template to an ignored `.local.env`, resolve a
 
 - DROID uses a 129-token memmap cache built by `scripts/cache_droid_t5.py`; LIBERO uses 128-token prompt files built by `vjepa_policy.text_embeddings`. Its default is 128; pass other recipes' lengths explicitly.
 - The DROID reference shell launcher enforces eight GPUs. Use its Python entry point with Accelerate for another topology, not an ineffective environment override.
-- The fresh wrapper clears inherited `PREDICTOR_INIT`; predictor transfer needs the explicit source path and packed state 48. Only predictor weights transfer. `--resume` is a different operation and restores training progress.
+- The fresh wrapper clears inherited `PREDICTOR_INIT`; predictor transfer needs the explicit source path and packed state 48. Only predictor weights transfer. `--resume` reloads policy weights/progress and advances the schedule; AdamW moments are not checkpointed.
 - Global batch is GPUs × per-device batch × accumulation. Keep it fixed for a reproduction, or record the changed value for an experiment.
 - Templates and launchers share `configs/recipes/*.env`. Existing environment variables override defaults; source the local template for artifact paths. LIBERO defaults to V-JEPA 2.1 ViT-L, state width 48, and text length 128.
 - New checkpoints serialize serving metadata. Preserve the generated dataset statistics and cache/encoder provenance for later inference.
 
 Use a fresh output directory for a smoke run. Report whether cache construction, data loading, forward/backward, optimizer updates, and checkpoint saving were actually tested. Do not infer training success from imports or CLI help alone. For custom data/encoders follow [Extension contracts](../../../docs/extensions.md).
+
+For a single original LIBERO task, `scripts/prepare_libero_single_task.py` creates disjoint train/heldout roots with training-only statistics and a source manifest. It preserves no-ops and uses native 128px images rotated 180 degrees. `--save-initial-checkpoint` saves an untrained comparison policy; use separate fresh directories for smoke and formal training. `scripts/run_single_task_experiment.py` requires an explicit artifact/config JSON; label its smaller task/batch/text-encoder choices as adaptations.
+
+For single-host diagnostics with several network interfaces, record any NCCL transport overrides in the explicit JSON `extra_env`. Require the launcher to exit successfully after checkpoint saving; a logged optimizer step is not evidence that decoder workers and distributed teardown completed.
+
+Selected multi-task diagnostics use `scripts/prepare_libero_multi_task.py` with exact pooled training-only normalization and one shared prompt cache. `--stop-at` requires a timezone; `--stop-file` is checked collectively at optimizer boundaries. Inspect `training_result.json` for actual progress. `scripts/run_training_rollout_pipeline.py` gates serial rollouts on completed training and enforces a process-group deadline; reserve its two-minute forced-stop allowance before GPU handover.
+
+Original-HDF5 conversion preserves robosuite gripper signs and records `gripper_action_convention=robosuite`. Preserve this metadata through pooled normalization and checkpoint export; test expert-action normalization/decoding round trips.
+
+For the native RMBench ALOHA baseline, use the [RMBench skill](../vjepa-policy-rmbench/SKILL.md) and its separate 14D joint-action adapter.

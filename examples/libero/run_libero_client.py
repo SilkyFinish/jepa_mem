@@ -49,6 +49,8 @@ import tqdm
 import tyro
 from termcolor import cprint
 
+from examples.libero.selection import select_tasks, select_initial_states
+
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
@@ -77,6 +79,9 @@ class Args:
     record_video: bool = True
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: Optional[int] = None  # Optional smoke-test limit; None evaluates the full suite.
+    task_ids: Optional[list[int]] = None  # Explicit suite task IDs for diagnostics.
+    initial_state_ids: Optional[list[int]] = None  # Fixed saved states, one per trial.
+    render_resolution: int = 256  # Use 128 only for a dataset captured at 128px.
 
     #################################################################################################################
     # Utils
@@ -111,10 +116,9 @@ def eval_libero(args: Args) -> None:
     num_tasks_in_suite = task_suite.n_tasks
     if args.benchmark == "libero-plus" and len(plus_tasks) != num_tasks_in_suite:
         raise ValueError("Manifest and simulator task counts differ")
-    if args.max_tasks is not None:
-        if args.max_tasks <= 0:
-            raise ValueError(f"max_tasks must be positive, got {args.max_tasks}")
-        num_tasks_in_suite = min(num_tasks_in_suite, args.max_tasks)
+    task_ids = select_tasks(num_tasks_in_suite, args.task_ids, args.max_tasks)
+    if args.render_resolution <= 0:
+        raise ValueError("render_resolution must be positive")
     cprint(f"Task suite: {args.task_suite_name}", "green")
     logging.info(f"Task suite: {args.task_suite_name}")
 
@@ -141,15 +145,16 @@ def eval_libero(args: Args) -> None:
     # Start evaluation
     total_episodes, total_successes = 0, 0
     task_results = []
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    for task_id in tqdm.tqdm(task_ids):
         # Get task
         task = task_suite.get_task(task_id)
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
+        state_ids = select_initial_states(len(initial_states), args.num_trials_per_task, args.initial_state_ids)
 
         # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        env, task_description = _get_libero_env(task, args.render_resolution, args.seed)
 
         plus_task = plus_tasks.get(task_id)
         if plus_task is not None:
@@ -171,7 +176,7 @@ def eval_libero(args: Args) -> None:
             frame_hist = collections.deque(maxlen=args.frame_stride + 2)
 
             # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            obs = env.set_init_state(initial_states[state_ids[episode_idx]])
 
             # Setup
             t = 0
@@ -255,6 +260,7 @@ def eval_libero(args: Args) -> None:
 
             row = {"suite": args.task_suite_name, "task_id": task_id,
                    "name": task.name, "episode_id": episode_idx,
+                   "initial_state_id": state_ids[episode_idx],
                    "instruction": task_description, "success": bool(done)}
             if plus_task is not None:
                 row.update(category=plus_task["category"], manifest_sha256=manifest_sha)

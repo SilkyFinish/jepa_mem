@@ -25,3 +25,9 @@ Use a free port and the user's selected GPU. Keep logs and commands in a fresh a
 The client supplies current and past images, rotates both views by 180 degrees, and maintains frame-stride history. Do not replace this with a single-frame request when checking the trained policy. Read `run_libero_client.py` and the serving adapter when adapting an observation source.
 
 Report which stages succeeded: imports, loading, readiness, action request, or rollout. Preserve errors and stop only processes created for this run. Use the [LIBERO skill](../vjepa-policy-libero-eval/SKILL.md) for a success-rate evaluation.
+
+The serving boundary accepts canonical LeRobot keys and OpenPI wire aliases `observation/<camera>`, `observation/<camera>_past`, `observation/state`, and `prompt`. Wire images are uint8 HWC; canonical normalized CHW tensors also work. Both past images remain required, and image rotation stays in the simulator client.
+
+Verify the gripper convention separately from image/state shapes: original HDF5 targets use robosuite -1=open/+1=closed, while reference LeRobot targets use 0=closed/1=open. The output decoder resolves explicit override, checkpoint/statistics metadata, then legacy LeRobot default. For older raw-HDF5 weights, explicitly select `--gripper-action-convention robosuite`. Validate normalization plus output decoding against recorded expert actions before claiming rollout scores.
+
+For the native RMBench ALOHA baseline, use the [RMBench skill](../vjepa-policy-rmbench/SKILL.md) and its separate 14D joint-action adapter.

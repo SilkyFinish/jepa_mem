@@ -9,7 +9,11 @@ from dataclasses import dataclass, fields, replace
 import numpy as np
 import torch
 
+from vjepa_policy.policy_serving.actions import resolve_gripper_convention, to_env_action
 from vjepa_policy.data import CausalPatchMask
+from vjepa_policy.policy_serving.observations import (
+    camera_observation, instruction, state_observation, to_uint8_hwc,
+)
 from vjepa_policy.datasets import (
     DEFAULT_PROMPT,
     ActionStateNormalizer,
@@ -132,6 +136,7 @@ class PolicyServingConfig:
     view_layout: str = "independent"
     camera_keys: tuple[str, ...] | None = None
     dataset_stats: str | None = None
+    gripper_action_convention: str | None = None
 
     @classmethod
     def from_checkpoint(cls, ckpt_path, overrides=None):
@@ -424,16 +429,6 @@ def _strip_prefix(state_dict, prefix="module.backbone."):
         if name.startswith("module.")
     }
     return module_prefixed or dict(state_dict)
-
-
-def to_env_action(action, binarize_gripper=True):
-    """Convert LeRobot LIBERO actions to the robosuite action convention."""
-    action = np.asarray(action, dtype=np.float32).copy()
-    action[..., -1] = 1.0 - 2.0 * action[..., -1]
-    if binarize_gripper:
-        action[..., -1] = np.sign(action[..., -1])
-    action[..., :6] = np.clip(action[..., :6], -1.0, 1.0)
-    return action
 
 
 class VJEPAPolicyServing:
@@ -1032,6 +1027,10 @@ class VJEPAPolicyServing:
                 f"action normalization stats not found: {stats_path}"
             )
         self.action_normalizer = ActionStateNormalizer.load(stats_path)
+        self.gripper_action_convention = resolve_gripper_convention(
+            args.gripper_action_convention, self.action_normalizer.metadata
+        )
+        logger.info("[action] gripper_action_convention=%s", self.gripper_action_convention)
 
     def _load_language(self, task_text):
         if task_text in self._lang_cache:
@@ -1047,13 +1046,13 @@ class VJEPAPolicyServing:
 
     @staticmethod
     def _to_uint8_hwc(image):
-        if image.ndim == 4:
-            image = image.squeeze(0)
-        image = (image.float() * 255.0).clamp(0, 255).round().to(torch.uint8)
-        return image.permute(1, 2, 0).cpu().numpy()
+        return to_uint8_hwc(image)
 
     @staticmethod
     def _to_state_tensor(state):
+        # Msgpack arrays may be read-only views of the received message buffer.
+        if isinstance(state, np.ndarray) and not state.flags.writeable:
+            state = state.copy()
         state = state if isinstance(state, torch.Tensor) else torch.as_tensor(state)
         if state.ndim == 1:
             state = state.unsqueeze(0)
@@ -1066,21 +1065,15 @@ class VJEPAPolicyServing:
     def _prepare_observation(self, obs):
         views = []
         for key in self.camera_keys:
-            current = self._to_uint8_hwc(obs[key])
-            past_key = f"{key}_past"
-            if past_key not in obs:
-                raise KeyError(f"Missing past-frame view {past_key!r}")
-            past = self._to_uint8_hwc(obs[past_key])
+            current = self._to_uint8_hwc(camera_observation(obs, key))
+            past = self._to_uint8_hwc(camera_observation(obs, key, past=True))
             frames = np.stack([past, current] + [current] * (self.num_frames - 2))
             frames = torch.from_numpy(frames).permute(0, 3, 1, 2)
             views.append(self.video_transform(frames))
         clip = combine_video_clips(views, self.view_combiner)
 
-        language, language_mask = self._load_language(obs["task"][0])
-        state_key = "observation.state"
-        if state_key not in obs:
-            raise KeyError(f"Missing {state_key!r}; proprio conditioning is required")
-        state = self._to_state_tensor(obs[state_key])
+        language, language_mask = self._load_language(instruction(obs))
+        state = self._to_state_tensor(state_observation(obs))
         return clip, language, language_mask, state
 
     @torch.no_grad()
@@ -1129,7 +1122,8 @@ class VJEPAPolicyServing:
         return [
             {
                 "actions": to_env_action(
-                    action.numpy(), binarize_gripper=self.binarize_gripper
+                    action.numpy(), binarize_gripper=self.binarize_gripper,
+                    gripper_action_convention=self.gripper_action_convention
                 )
             }
             for action in actions

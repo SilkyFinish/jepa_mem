@@ -25,3 +25,9 @@ Resolve `RUN_DIR`, `CHECKPOINT`, `DATASET_STATS`, `VJEPA2_ENCODER_CHECKPOINT`, `
 Inspect `summary.txt`, each `.status`, and each suite's `*_eval_results.txt`. The launcher validates IDs 0–9, trials per task, totals, and success counts. For the full protocol require all four workers to exit zero, 500 episodes/suite, and 2,000 overall. Compute rate as total successes / total episodes; do not average partial suites into a full score. Keep diagnostic results separate.
 
 A failed worker, missing coverage, or stale result is incomplete. Preserve logs, use a new directory for retries, and stop only this run's processes. Report the actual protocol and completion count; do not use historical private scores as pass/fail thresholds.
+
+For matched single-task diagnostics, the direct client supports explicit `--args.task-ids` and `--args.initial-state-ids` (one state per trial). Records include `initial_state_id`. Use the same fixed state list for both policies. `--args.render-resolution` defaults to 256; change it and `resize-size` together only to match a documented dataset capture resolution. The full-suite validator does not accept arbitrary selected task IDs as a full benchmark.
+
+For an explicitly selected multi-task diagnostic, `scripts/run_training_rollout_pipeline.py` evaluates configured tasks serially only after completed training. Each task uses an explicit suite/task ID and fixed initial-state list; inspect every task's completion and the pipeline's total episode count. A deadline stop remains incomplete and is not a full-suite score.
+
+A result obtained with the wrong gripper decoder is an invalid policy evaluation. Preserve that run, record the convention correction, and rerun matched task/state coverage into a fresh directory using unchanged weights.

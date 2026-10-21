@@ -23,3 +23,7 @@ MUJOCO_LOG.TXT
 # Local environments and machine-specific recipe copies
 .venv/
 configs/*.local.env
+
+# Local project environments and benchmark assets
+.envs/
+third_party/

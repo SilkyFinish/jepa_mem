@@ -57,7 +57,7 @@ python -m vjepa_policy.text_embeddings \
   --model-name google/t5-v1_1-xxl --context-length 128 --device cuda
 ```
 
-The cache builder's default is 32, so pass `--context-length 128` explicitly. Each file is `<sha256(prompt)>.t5_len128.pt`, containing `context` and `mask`. The prompt template is defined in `src/vjepa_policy/datasets/prompts.py`.
+The cache builder's default is 128, so pass `--context-length 128` explicitly. Each file is `<sha256(prompt)>.t5_len128.pt`, containing `context` and `mask`. The prompt template is defined in `src/vjepa_policy/datasets/prompts.py`.
 
 ### Train a policy
 
@@ -100,6 +100,24 @@ The recipe uses two camera views. `--max-views 4` sets view-embedding table capa
 
 ## Checkpoint resumption and other datasets
 
-`--predictor-init` imports only predictor weights; `--resume` restores training progress and optimizer state. Pass these to a supported Python entry point or a wrapper that forwards arguments. `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
+`--predictor-init` imports only predictor weights; `--resume` reloads trainable weights and progress, then fast-forwards the learning-rate schedule; AdamW moments are not saved or restored. Pass these to a supported Python entry point or a wrapper that forwards arguments. `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
 
 The generic entry points are `scripts/pretrain_predictor.py` for predictor-only pretraining and `scripts/train_vjepa_policy.py` for downstream joint training. See [Extension contracts](extensions.md) for `--dataset-factory`, camera order, tensor shapes, and encoder registration. For RoboCasa-GR1, use its [preparation/training guide](../scripts/gr1/README.md) and [evaluation example](../examples/gr1/README.md).
+
+## Single-task preparation and diagnostics
+
+For a small experiment on an existing original LIBERO HDF5, use `scripts/prepare_libero_single_task.py --source SOURCE.hdf5 --output runs/task_data`. It preserves native 20 Hz frames/actions, rotates both cameras 180 degrees to match the client, splits whole demonstrations deterministically (40 train, remainder heldout by default), and writes training-only quantile statistics plus a source-hashed manifest. The source must provide `ee_pos`, axis-angle `ee_ori`, `gripper_states`, `agentview_rgb`, and `eye_in_hand_rgb`. This adapter currently expects native 128px images. Build the text cache for that instruction before training.
+
+The generic trainer accepts `--save-initial-checkpoint` to save a step-zero policy for a matched untrained baseline. This flag does not resume or initialize from another policy. A frozen visual encoder remains required.
+
+`scripts/run_single_task_experiment.py {smoke,train,eval} --config CONFIG.json --output-dir FRESH_DIR` records exact commands and launches an explicitly configured diagnostic. The JSON contains interpreter/artifact paths, exact `train_args`, GPU IDs, smoke/training step budgets, and fixed evaluation task/state IDs. `eval` additionally requires `--checkpoint`, uses statistics beside that checkpoint, and can reduce coverage using `--trials`. Keep each phase in a fresh output directory. See [single-task usage](single-task.md). These experiments are reduced diagnostics, not the four-suite paper protocol.
+
+### Selected multi-task runs with a time budget
+
+For a selected LIBERO subset, `scripts/prepare_libero_multi_task.py --request REQUEST_JSON` converts each task separately and pools only training action/state samples to compute shared quantiles. Its request records task names, source HDF5 files, prepared-data directories, seed, training demonstrations per task, epochs, global batch, and rollout budget; generated manifests preserve the split and source hashes. Build the text cache across all training roots.
+
+The Python training entry points accept `--stop-at ISO8601_WITH_TIMEZONE` and `--stop-file PATH`. Each rank checks the request at optimizer boundaries and collectively agrees to save and exit. `training_result.json` records actual steps, completion, and the final checkpoint. Checkpoints preserve model weights and progress; AdamW moments are not saved. A stop request does not count as completed training.
+
+`scripts/run_training_rollout_pipeline.py --config EXPERIMENT_JSON --output-dir FRESH_DIR` runs the explicit training configuration, then evaluates each configured task serially using the completed final checkpoint. Configuration includes `tasks`, `rollouts_per_task`, and a timezone-qualified `pipeline_deadline`, in addition to the diagnostic launcher fields. It skips rollouts after failed or incomplete training, writes `status.json`, and owns a separate process group for each stage. At the deadline it requests a training save, allows 90 seconds, then terminates remaining workers and forcibly releases its process group after 120 seconds; schedule the deadline early enough for this allowance. Rollouts terminate at the deadline, with incomplete coverage preserved as partial results.
+
+The original-HDF5 converters retain raw robosuite gripper targets (-1=open, +1=closed) and record `gripper_action_convention=robosuite` in statistics/manifests. New training checkpoints copy this convention into serving metadata. For existing weights trained from raw targets with older metadata, use the explicit serving override; correcting this output conversion does not require retraining.

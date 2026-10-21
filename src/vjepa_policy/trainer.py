@@ -10,6 +10,7 @@
 # needs to know which architecture it is driving.
 
 import gc
+import json
 import os
 import time
 import warnings
@@ -20,6 +21,7 @@ from accelerate.utils import DistributedDataParallelKwargs
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Sampler
 
+from vjepa_policy.stopping import deadline_timestamp, stop_requested
 from vjepa_policy.utils.logging import get_logger
 
 logger = get_logger(__name__, force=True)
@@ -124,6 +126,8 @@ class _EpochRandomSampler(Sampler):
 class Trainer:
     def __init__(self, model, dataset, collator, *, cfg):
         self.cfg = cfg
+        self.stop_at = deadline_timestamp(cfg.get("stop_at"))
+        self.stop_file = cfg.get("stop_file")
         self.output_dir = cfg["output_dir"]
         self.max_grad_norm = cfg["max_grad_norm"]
         os.makedirs(self.output_dir, exist_ok=True)
@@ -547,6 +551,14 @@ class Trainer:
         os.replace(temp_path, path)
         logger.info("[ckpt] saved %s", path)
 
+    def _stop_requested(self):
+        if self.stop_at is None and not self.stop_file:
+            return False
+        local = stop_requested(self.stop_at, self.stop_file)
+        flag = torch.tensor([int(local)], device=self.accelerator.device)
+        # Every rank takes the same branch, even across a deadline boundary.
+        return bool(self.accelerator.reduce(flag, reduction="sum").item())
+
     def train(self):
         core = self.accelerator.unwrap_model(self.model)
         core.encoder.eval()
@@ -573,7 +585,8 @@ class Trainer:
         microbatches_in_epoch = 0
         steps_since_recycle = 0
         precision_verified = False
-        while self.global_step < self.max_steps:
+        stopped = self._stop_requested()
+        while self.global_step < self.max_steps and not stopped:
             if microbatches_in_epoch >= self.usable_microbatches_per_epoch:
                 del data_iter
                 gc.collect()
@@ -705,7 +718,10 @@ class Trainer:
                                 self.wandb_run.log(payload, step=self.global_step)
                     if self.save_every > 0 and self.global_step % self.save_every == 0:
                         self._save()
-                    if self.global_step >= self.max_steps:
+                    stopped = self._stop_requested()
+                    if stopped and self.accelerator.is_main_process:
+                        logger.info("[stop] saving at optimizer step %d", self.global_step)
+                    if self.global_step >= self.max_steps or stopped:
                         break
             # Recreating the iterator on the same prepared DataLoader tears down
             # non-persistent workers without retaining another loader in Accelerate.
@@ -728,7 +744,28 @@ class Trainer:
                 if self.accelerator.is_main_process:
                     logger.info("[worker-cycle] respawned data workers @ step %d | %s",
                                 self.global_step, self._mem_report())
+        # Release nonpersistent decoder workers before distributed teardown.
+        del data_iter
+        gc.collect()
         self._save()
+        if self.accelerator.is_main_process:
+            result = {
+                "completed": self.global_step >= self.max_steps,
+                "stop_reason": "max_steps" if self.global_step >= self.max_steps else "stop_requested",
+                "step": self.global_step, "max_steps": self.max_steps,
+                "optimizer_steps_per_epoch": self.optimizer_steps_per_epoch,
+                "checkpoint": f"checkpoint_step{self.global_step:06d}.pt",
+                "optimizer_state_saved": False,
+            }
+            result_path = os.path.join(self.output_dir, "training_result.json")
+            temporary = result_path + ".tmp"
+            with open(temporary, "w") as handle:
+                json.dump(result, handle, indent=2)
+                handle.write("\n")
+            os.replace(temporary, result_path)
         if self.wandb_run is not None:
             self.wandb_run.finish()
+        # All ranks must finish checkpoint/log writes before either exits NCCL.
+        self.accelerator.wait_for_everyone()
+        self.accelerator.end_training()
         logger.info("[done] training finished at step=%d", self.global_step)

@@ -19,6 +19,7 @@ class Args:
     pretrained_encoder: str
     text_cache_dir: str
     dataset_stats: str | None = None
+    gripper_action_convention: Literal["lerobot", "robosuite"] | None = None
     host: str = "0.0.0.0"
     port: int = 10000
     seed: int = 7

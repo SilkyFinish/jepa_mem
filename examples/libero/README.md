@@ -55,3 +55,13 @@ Record the checkpoint and encoder identities, cache provenance, repository revis
 ## Legacy checkpoints
 
 For older checkpoints without complete metadata, recover the original run configuration before launching. `POLICY_MAX_STATE_DIM=0` explicitly selects variable-width state. Set `POLICY_T5_LEN`, encoder identity, views, and RoPE settings to that run's actual values; “scratch” does not imply a particular text length or state contract. Keep training-template variables out of an unrelated evaluation environment.
+
+## Fixed task and state diagnostics
+
+The direct client supports `--args.task-ids 7` to select an actual suite ID rather than the first task, and `--args.initial-state-ids 24 3` with `--args.num-trials-per-task 2` to use fixed saved initial states. Both lists must be nonempty, unique, and in range; `task-ids` cannot be combined with `max-tasks`. Every episode records its `initial_state_id`. Reuse exactly the same selected states when comparing untrained and trained checkpoints. This direct selection is a diagnostic, not a complete suite score; the standard shell validator still expects full task IDs.
+
+`--args.render-resolution 128 --args.resize-size 128` matches a policy trained on original native 128px HDF5 images; the server then applies the checkpoint's 224px transform. The default reference render resolution remains 256. Official legacy LIBERO `.pruned_init` files contain NumPy pickles; with PyTorch 2.6+ a dedicated simulator launcher can set `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` when loading these trusted local benchmark assets.
+
+The serving boundary accepts canonical LeRobot keys and OpenPI wire aliases `observation/<camera>`, `observation/<camera>_past`, `observation/state`, and `prompt`. Wire images are uint8 HWC; canonical normalized CHW tensors also work. Both past images remain required, and image rotation stays in the simulator client.
+
+Gripper action conventions must match the training data. The reference LeRobot encoding is 0=closed and 1=open; original LIBERO HDF5 actions already use robosuite -1=open and +1=closed. Serving reads `gripper_action_convention` from checkpoint/statistics metadata. For older raw-HDF5 checkpoints, pass `--gripper-action-convention robosuite`; the diagnostic JSON launcher accepts the same `gripper_action_convention` field. Do not apply the LeRobot inversion to raw robosuite targets. Legacy checkpoints without this metadata retain the LeRobot default.

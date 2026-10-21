@@ -12,6 +12,7 @@ Read only the skill relevant to the requested task:
 | Serve a checkpoint or check an action request | [.agents/skills/vjepa-policy-inference/SKILL.md](.agents/skills/vjepa-policy-inference/SKILL.md) |
 | LIBERO success rate | [.agents/skills/vjepa-policy-libero-eval/SKILL.md](.agents/skills/vjepa-policy-libero-eval/SKILL.md) |
 | LIBERO-Plus robustness | [.agents/skills/vjepa-policy-libero-plus-eval/SKILL.md](.agents/skills/vjepa-policy-libero-plus-eval/SKILL.md) |
+| RMBench | [.agents/skills/vjepa-policy-rmbench/SKILL.md](.agents/skills/vjepa-policy-rmbench/SKILL.md) |
 | RoboCasa-GR1 | [.agents/skills/vjepa-policy-gr1/SKILL.md](.agents/skills/vjepa-policy-gr1/SKILL.md) |
 
 ## Source of truth

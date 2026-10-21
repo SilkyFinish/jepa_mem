@@ -475,6 +475,10 @@ def main(
         dataset, collator = dataset_collator_builder(
             args, action_chunk_size=args.action_chunk_size
         )
+    normalizer = getattr(dataset, "normalizer", None)
+    convention = getattr(normalizer, "metadata", {}).get("gripper_action_convention")
+    if convention is not None:
+        model.policy_serving["config"]["gripper_action_convention"] = convention
     run_training(args, model, dataset, collator)
 
 

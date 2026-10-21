@@ -25,7 +25,7 @@ export LIBERO_PLUS_PYTHON="$CONDA_PREFIX/bin/python"
 "$LIBERO_PLUS_PYTHON" -m pip install -e "$LIBERO_PLUS_ROOT"
 ```
 
-Download `assets.zip` from the official [Sylvest/LIBERO-plus dataset](https://huggingface.co/datasets/Sylvest/LIBERO-plus/tree/main). Extract it under `$LIBERO_PLUS_ROOT/libero/libero/`, producing `assets/textures`, `assets/new_objects`, and the other official asset directories. BDDL tasks and initial states come from the pinned Git checkout. Save the archive's SHA-256 with your experiment. Torch 2.5.1 preserves the upstream state loader's behavior; check its `weights_only` handling before upgrading Torch for these state files. The dependency recipe is not a complete lockfile or a GPU validation claim.
+Download `assets.zip` from the official [Sylvest/LIBERO-plus dataset](https://huggingface.co/datasets/Sylvest/LIBERO-plus/tree/main). Extract it under `$LIBERO_PLUS_ROOT/libero/libero/`, producing `assets/textures`, `assets/new_objects`, and the other official asset directories. Inspect the ZIP member paths first: some official archives include a long source-directory prefix before `assets/`. Strip that prefix so the extracted directories are directly under the configured assets root, rather than nested below the source machine's directory tree. BDDL tasks and initial states come from the pinned Git checkout. Save the archive's SHA-256 with your experiment. Torch 2.5.1 preserves the upstream state loader's behavior; check its `weights_only` handling before upgrading Torch for these state files. The dependency recipe is not a complete lockfile or a GPU validation claim.
 
 ## Prepare tasks and text embeddings
 
