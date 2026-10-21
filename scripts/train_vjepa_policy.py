@@ -4,6 +4,12 @@ import argparse
 
 import torch
 
+from vjepa_policy.policy_arch import capabilities, require_checkpoint_arch
+from vjepa_policy.memory_training import (
+    add_history_args, set_history_defaults, validate_history_args, validate_predictor_transfer,
+    validate_reference_capacity,
+)
+
 from vjepa_policy.models.wm_predictor import (
     build_world_model_predictor,
 )
@@ -76,6 +82,10 @@ def parse_args(argv=None):
             "predictor parameters still load strictly."
         ),
     )
+    add_history_args(parser)
+    preliminary = parser.parse_args(argv)
+    if preliminary.policy_arch == "full_history":
+        set_history_defaults(parser)
     return parser.parse_args(argv)
 
 
@@ -155,9 +165,11 @@ def parameter_summary(model):
         "encoder_frozen": model.encoder,
         "predictor": model.predictor,
         "action_expert": model.action_expert,
-        "proprio_encoder": model.proprio_encoder,
+        "proprio_encoder": getattr(model, "proprio_encoder", None),
     }
     for name, module in groups.items():
+        if module is None:
+            continue
         count = sum(parameter.numel() for parameter in module.parameters())
         trainable = sum(
             parameter.numel() for parameter in module.parameters() if parameter.requires_grad
@@ -165,11 +177,13 @@ def parameter_summary(model):
         print(f"[parameters] {name}={count:,} ({count / 1e6:.2f}M), trainable={trainable:,}")
 
 
-def _load_predictor_initialization(predictor, checkpoint_path, view_map=None):
+def _load_predictor_initialization(predictor, checkpoint_path, view_map=None, *, full_history=False):
     """Load only predictor weights; do not restore policy training progress."""
     payload = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False, mmap=True
     )
+    if full_history:
+        validate_predictor_transfer(payload, predictor)
     if isinstance(payload, dict) and "predictor" in payload:
         state = payload["predictor"]
         metadata = payload.get("model_topology") or {}
@@ -250,13 +264,34 @@ def _predictor_max_views(requested, num_views):
 
 
 def main(
-    policy_builder=build_vjepa_policy,
-    encoder_builder=build_frozen_encoder,
-    predictor_builder=build_world_model_predictor,
-    dataset_collator_builder=build_dataset_collator,
+    policy_builder=None,
+    encoder_builder=None,
+    predictor_builder=None,
+    dataset_collator_builder=None,
     args=None,
 ):
     args = parse_args() if args is None else args
+    full_history = getattr(args, "policy_arch", "legacy") == "full_history"
+    builtin_encoder = encoder_builder is None
+    encoder_builder = encoder_builder or build_frozen_encoder
+    dataset_collator_builder = dataset_collator_builder or build_dataset_collator
+    if full_history:
+        validate_history_args(args)
+        from vjepa_policy.models.memory_predictor import MemoryWorldModelPredictor
+        from vjepa_policy.models.memory_policy import build_full_history_policy
+        policy_builder = policy_builder or build_full_history_policy
+        predictor_builder = predictor_builder or MemoryWorldModelPredictor
+    else:
+        policy_builder = policy_builder or build_vjepa_policy
+        predictor_builder = predictor_builder or build_world_model_predictor
+    policy_caps = capabilities(policy_builder)
+    if full_history != (policy_caps.batch_schema == "rmbench_history_v0"):
+        raise ValueError("Policy builder batch schema does not match --policy-arch")
+    if getattr(args, "resume", None):
+        require_checkpoint_arch(
+            torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True),
+            "full_history" if full_history else "legacy",
+        )
     if args.action_chunk_size != args.num_frames - 1:
         raise ValueError("action_chunk_size must equal num_frames - 1")
     if args.pred_embed_dim % args.pred_num_heads:
@@ -271,8 +306,11 @@ def main(
         raise ValueError("--predictor-init cannot be combined with --resume")
 
     seed_process(args.seed)
+    if args.mixed_precision == "no":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     device = make_device()
-    if encoder_builder is build_frozen_encoder and not getattr(args, "encoder", None):
+    if builtin_encoder and not getattr(args, "encoder", None):
         args.encoder = _implicit_encoder_name(args)
     camera_keys = get_camera_keys(args)
     num_views = len(camera_keys) if args.view_layout == "independent" else 1
@@ -280,6 +318,8 @@ def main(
     predictor_view_map = getattr(args, "predictor_view_map", None)
     source_max_views = _predictor_source_max_views(predictor_init)
     if predictor_init and predictor_view_map is None and source_max_views is not None:
+        if full_history and source_max_views != num_views:
+            raise ValueError("Full-history predictor transfer requires an explicit --predictor-view-map")
         if source_max_views > num_views:
             predictor_view_map = list(range(num_views))
     if predictor_view_map is not None and len(predictor_view_map) != predictor_max_views:
@@ -294,7 +334,7 @@ def main(
         encoder_spec = EncoderSpec(
             name=(
                 getattr(args, "encoder", None)
-                if encoder_builder is build_frozen_encoder
+                if builtin_encoder
                 else None
             )
             or getattr(encoder, "_vjepa_policy_model_name", None)
@@ -313,8 +353,8 @@ def main(
         num_views=num_views,
         context_steps=args.context_tubelets,
     )
-    use_layout_contract = dataset_collator_builder is build_dataset_collator and (
-        declared_encoder_spec is not None or encoder_builder is build_frozen_encoder
+    use_layout_contract = getattr(dataset_collator_builder, "supports_local_layout", False) and (
+        declared_encoder_spec is not None or builtin_encoder
     )
     # The published cross-attention policy is the canonical fixed-width path.
     # Experimental builders retain their historical state contract until they
@@ -322,7 +362,7 @@ def main(
     max_state_dim = int(getattr(args, "max_state_dim", 0) or 0)
     if max_state_dim < 0:
         raise ValueError("max_state_dim must be positive or 0")
-    use_fixed_state = bool(max_state_dim) and policy_builder is build_vjepa_policy
+    use_fixed_state = bool(max_state_dim) and policy_caps.supports_packed_state
     if use_fixed_state:
         if args.proprio_encoding != "identity":
             raise ValueError(
@@ -383,19 +423,32 @@ def main(
         ),
         latent_layout=layout if use_layout_contract else None,
     )
-    if policy_builder is build_vjepa_policy:
-        model = policy_builder(encoder, predictor, **policy_kwargs)
+    if full_history:
+        model = policy_builder(
+            encoder, predictor, action_hidden_size=args.action_hidden_size,
+            condition_num_heads=args.condition_num_heads,
+            action_num_inference_steps=args.action_num_inference_steps,
+            action_loss_weight=args.action_loss_weight,
+            encoder_batch_size=args.history_encoder_batch_size,
+        )
+        model.raw_proprio_dim = args.proprio_dim
+        model.max_state_dim = max_state_dim
+        model.packed_proprio_dim = model_proprio_dim
+        model.latent_layout = layout
+        from vjepa_policy.history_features import encoder_signature
+        model.frozen_encoder_signature = encoder_signature(args)
     else:
-        policy_kwargs.pop("latent_layout", None)
+        if not policy_caps.supports_local_layout:
+            policy_kwargs.pop("latent_layout", None)
         model = policy_builder(encoder, predictor, **policy_kwargs)
     predictor_init_topology = None
     if predictor_init:
-        if policy_builder is not build_vjepa_policy:
+        if not policy_caps.supports_predictor_init:
             raise ValueError(
                 "--predictor-init is supported only by the canonical policy builder"
             )
         predictor_init_topology = _load_predictor_initialization(
-            model.predictor, predictor_init, view_map=predictor_view_map
+            model.predictor, predictor_init, view_map=predictor_view_map, full_history=full_history
         )
     model.camera_keys = tuple(camera_keys)
     model.view_layout = args.view_layout
@@ -467,7 +520,7 @@ def main(
         }
     parameter_summary(model)
     model = model.to(device)
-    if dataset_collator_builder is build_dataset_collator:
+    if getattr(dataset_collator_builder, "supports_local_layout", False):
         dataset, collator = dataset_collator_builder(
             args, action_chunk_size=args.action_chunk_size, layout=layout
         )
@@ -475,6 +528,11 @@ def main(
         dataset, collator = dataset_collator_builder(
             args, action_chunk_size=args.action_chunk_size
         )
+    if full_history:
+        if getattr(dataset, "batch_schema", None) != policy_caps.batch_schema:
+            raise ValueError("History policy requires the history dataset/collator contract")
+        validate_reference_capacity(dataset, args.batch_size)
+        model.training_data_provenance = dataset.provenance
     normalizer = getattr(dataset, "normalizer", None)
     convention = getattr(normalizer, "metadata", {}).get("gripper_action_convention")
     if convention is not None:

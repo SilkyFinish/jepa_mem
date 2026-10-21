@@ -477,9 +477,14 @@ def run_training(args, model, dataset, collator):
             "resume_from": args.resume,
             "train_seed": args.seed,
             "data_seed": args.seed,
+            "history_bucket_size": getattr(args, "history_bucket_size", 0),
         },
     )
     if getattr(args, "save_initial_checkpoint", False) and not args.resume:
         trainer._save()
         trainer.accelerator.wait_for_everyone()
     trainer.train()
+
+
+# Custom builders can explicitly opt into the encoder layout contract.
+build_dataset_collator.supports_local_layout = True

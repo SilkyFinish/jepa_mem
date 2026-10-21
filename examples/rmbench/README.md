@@ -73,3 +73,7 @@ Use the native v1.0 task ZIP for this adapter. The same Hugging Face repository 
 ## Full-History v0 development
 
 The new version starts with the separate [M0 input contract](../../docs/full_history_v0_m0.md). Its check tool validates complete episode-prefix sampling and native data without changing this short-context baseline. M0 does not yet provide a memory model, training launcher, or stateful server.
+
+## Full-History v0 training
+
+The existing RMBench launchers remain the legacy baseline. The explicit full_history Python route adds complete observed prefixes, frozen feature caching and versioned checkpoints; see [M3 integration](../../docs/full_history_v0_m3.md). Its current dense attention backend supports short-prefix diagnostics only; it does not establish a full-history rollout score or replace the native baseline serving protocol.

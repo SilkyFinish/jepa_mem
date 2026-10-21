@@ -144,6 +144,8 @@ class PolicyServingConfig:
         checkpoint = torch.load(
             ckpt_path, map_location="cpu", weights_only=False, mmap=True
         )
+        from vjepa_policy.policy_arch import require_checkpoint_arch
+        require_checkpoint_arch(checkpoint, "legacy")
         topology = checkpoint.get("model_topology") or {}
         saved = checkpoint.get("policy_serving") or {}
         values = {}
@@ -524,10 +526,12 @@ class VJEPAPolicyServing:
         )
         self.model_image_size = image_size
         policy_factory = policy_builder or build_vjepa_policy
+        from vjepa_policy.policy_arch import capabilities
+        policy_caps = capabilities(policy_factory)
         # Experimental geometry/ablation builders retain their historical
         # state topology until they explicitly adopt the packed contract.
         state_contract_max = (
-            args.max_state_dim if policy_factory is build_vjepa_policy else None
+            args.max_state_dim if policy_caps.supports_packed_state else None
         )
         if state_contract_max is None:
             model_proprio_dim = encoded_proprio_dim(
@@ -758,7 +762,7 @@ class VJEPAPolicyServing:
             condition_num_heads=args.condition_num_heads,
             action_num_inference_steps=args.action_num_inference_steps,
         )
-        if latent_layout is not None and policy_factory is build_vjepa_policy:
+        if latent_layout is not None and policy_caps.supports_local_layout:
             policy_kwargs["latent_layout"] = latent_layout
         policy = policy_factory(encoder, predictor, **policy_kwargs)
 
@@ -778,6 +782,8 @@ class VJEPAPolicyServing:
             )
             del encoder_checkpoint
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        from vjepa_policy.policy_arch import require_checkpoint_arch
+        require_checkpoint_arch(checkpoint, "legacy")
         expected_precision = {
             "fp32": "no",
             "fp16": "fp16",

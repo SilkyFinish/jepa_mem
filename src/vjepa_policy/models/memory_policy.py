@@ -124,6 +124,10 @@ class FullHistoryVJEPAPolicy(nn.Module):
             encoded = torch.cat(pieces)
             latents = encoded.new_zeros(batch_size, blocks, patches, width)
             latents[valid] = encoded
+        if latents.shape != (batch_size, blocks, patches, width):
+            raise ValueError("history_latents must match [B,K,P,D_encoder]")
+        if not latents.is_floating_point() or not torch.isfinite(latents[valid]).all():
+            raise ValueError("Valid history features must be finite floating point")
         return latents.masked_fill(~valid[..., None, None], 0)
 
     @torch.no_grad()
@@ -232,8 +236,19 @@ class FullHistoryVJEPAPolicy(nn.Module):
 
 def build_full_history_policy(encoder, predictor, *, config=None, action_hidden_size=512,
                               condition_num_heads=8, action_num_inference_steps=10, **kwargs):
-    """Explicit M2 Python factory; M3 will add CLI/schema checkpoint dispatch."""
+    """Build the production v0 geometry; reduced test models use the class directly."""
     config = config or FullHistoryV0Config()
+    if (predictor.img_height, predictor.img_width, predictor.patch_size,
+            predictor.tubelet_size, predictor.num_frames, predictor.num_views,
+            predictor.grid_depth, predictor.grid_height, predictor.grid_width,
+            predictor.lang_dim, predictor.proprio_dim) != (
+            224, 224, 16, 2, 10, 3, 5, 14, 14, 4096, 96):
+        raise ValueError("Production Full-History v0 requires the fixed M0 geometry")
+    if (getattr(encoder, "_vjepa_policy_family", None) != "vjepa2_1"
+            or getattr(encoder, "_vjepa_policy_model_name", None) != "vit_large"
+            or getattr(encoder, "embed_dim", None) != 1024
+            or predictor.predictor_embed.in_features != 1024):
+        raise ValueError("Production Full-History v0 requires the V-JEPA2.1 ViT-L encoder")
     rope_options = predictor.rope_options  # also rejects empty/inconsistent layers
     attention = predictor.predictor_blocks[0].self_attn
     action_expert = MemoryActionExpert(
@@ -247,3 +262,7 @@ def build_full_history_policy(encoder, predictor, *, config=None, action_hidden_
     return FullHistoryVJEPAPolicy(
         encoder, predictor, action_expert, config=config, strict_v0_inputs=True, **kwargs,
     )
+
+
+from vjepa_policy.policy_arch import HISTORY_CAPABILITIES
+build_full_history_policy.training_capabilities = HISTORY_CAPABILITIES

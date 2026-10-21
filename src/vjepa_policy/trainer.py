@@ -87,8 +87,9 @@ class _EpochRandomSampler(Sampler):
     worker restart transparent to epoch coverage.
     """
 
-    def __init__(self, data_source, *, seed: int):
+    def __init__(self, data_source, *, seed: int, bucket_size=0, batch_size=1):
         self.data_source = data_source
+        self.bucket_size, self.batch_size = bucket_size, batch_size
         self.seed = int(seed)
         self.epoch = -1
         self.position = 0
@@ -100,6 +101,20 @@ class _EpochRandomSampler(Sampler):
         generator = torch.Generator(device="cpu")
         generator.manual_seed(self.seed + self.epoch)
         self._order = torch.randperm(len(self.data_source), generator=generator)
+        lengths = getattr(self.data_source, "history_lengths", None)
+        if lengths is not None and self.bucket_size:
+            # Random pools, locally sorted lengths, then shuffled whole batches.
+            # One index per sample; worker recycling retains this same order.
+            pool = max(self.batch_size, self.bucket_size // self.batch_size * self.batch_size)
+            order = self._order.tolist()
+            order = [i for start in range(0, len(order), pool)
+                     for i in sorted(order[start:start + pool], key=lambda i: lengths[i])]
+            complete = len(order) // self.batch_size * self.batch_size
+            batches = [order[i:i + self.batch_size] for i in range(0, complete, self.batch_size)]
+            permutation = torch.randperm(len(batches), generator=generator).tolist()
+            self._order = torch.tensor(
+                [i for b in permutation for i in batches[b]] + order[complete:], dtype=torch.long,
+            )
         self.position = 0
 
     def set_position(self, position: int) -> None:
@@ -164,7 +179,8 @@ class Trainer:
         # restart resumes the same sample stream instead of silently starting
         # a fresh shuffle permutation.
         sampler_seed = int(data_seed if data_seed is not None else cfg.get("train_seed", 0))
-        self._epoch_sampler = _EpochRandomSampler(dataset, seed=sampler_seed)
+        self._epoch_sampler = _EpochRandomSampler(dataset, seed=sampler_seed,
+            bucket_size=cfg.get("history_bucket_size", 0), batch_size=cfg["batch_size"])
         self._loader_kwargs = dict(
             batch_size=cfg["batch_size"],
             shuffle=False,
@@ -282,14 +298,9 @@ class Trainer:
                     f"allow_tf32={ckpt.get('allow_tf32')!r}): {resume_from}"
                 )
         core = self.accelerator.unwrap_model(self.model)
-        logger.info("[resume] predictor load: %s",
-                    core.predictor.load_state_dict(ckpt["predictor"], strict=True))
-        if hasattr(core, "action_expert") and "action_expert" in ckpt:
-            logger.info("[resume] action_expert load: %s",
-                        core.action_expert.load_state_dict(ckpt["action_expert"], strict=True))
-        if hasattr(core, "proprio_encoder") and "proprio_encoder" in ckpt:
-            logger.info("[resume] proprio_encoder load: %s",
-                        core.proprio_encoder.load_state_dict(ckpt["proprio_encoder"], strict=True))
+        from vjepa_policy.policy_arch import load_policy_weights
+        load_policy_weights(core, ckpt)
+        logger.info("[resume] architecture validated; trainable weights loaded strictly")
         self.global_step = int(ckpt.get("step", 0))
         # Replay the scheduler's external .step() calls so the LR resumes at the
         # right point (AcceleratedScheduler handles the internal num_processes
@@ -544,6 +555,10 @@ class Trainer:
             payload["policy_serving"] = core.policy_serving
         if hasattr(core, "predictor_initialization"):
             payload["predictor_initialization"] = core.predictor_initialization
+        from vjepa_policy.memory_config import FullHistoryV0Config
+        if isinstance(getattr(core, "config", None), FullHistoryV0Config):
+            from vjepa_policy.policy_arch import memory_checkpoint_metadata
+            payload.update(memory_checkpoint_metadata(core))
         if self.cfg.get("training_stage"):
             payload["training_stage"] = self.cfg["training_stage"]
         temp_path = f"{path}.tmp.{os.getpid()}"

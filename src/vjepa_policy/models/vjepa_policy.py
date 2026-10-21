@@ -370,3 +370,7 @@ def build_vjepa_policy(
         patch_valid=patch_valid,
         latent_layout=latent_layout,
     )
+
+
+from vjepa_policy.policy_arch import LEGACY_CAPABILITIES
+build_vjepa_policy.training_capabilities = LEGACY_CAPABILITIES

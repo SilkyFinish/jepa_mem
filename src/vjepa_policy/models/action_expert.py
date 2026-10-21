@@ -396,6 +396,8 @@ class _ActionExpertBase(nn.Module):
         return predicted_velocity, target_velocity
 
     def _initial_actions(self, first_key, *, initial_noise=None, generator=None):
+        if initial_noise is not None and generator is not None:
+            raise ValueError("Pass initial_noise or generator, not both")
         shape = (first_key.shape[0], self.action_chunk_size, self.action_dim)
         if initial_noise is not None:
             return initial_noise.clone()
