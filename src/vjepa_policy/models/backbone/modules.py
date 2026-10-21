@@ -356,6 +356,10 @@ class RoPEAttention(nn.Module):
         # Explicit coordinates opt into memory semantics; old calls below keep
         # the original attention/dropout/position behavior and state_dict keys.
         if position_coords is not None or prefix_kv is not None:
+            if mask is not None:
+                raise ValueError("mask contains legacy position IDs; do not combine it with memory coordinates/KV")
+            if position_coords is None:
+                raise ValueError("prefix_kv requires explicit position_coords")
             return self._forward_memory(
                 x, position_coords, prefix_kv, attn_mask,
                 H_patches, W_patches, kv_out, return_kv,
@@ -425,11 +429,19 @@ class RoPEAttention(nn.Module):
     ):
         """Read-only [prefix, current] attention; return only current KV."""
         batch, tokens, channels = x.shape
+        if tokens == 0:
+            raise ValueError("memory attention requires at least one current token")
         validate_position_coords(position_coords, batch, tokens, x.device)
+        if self.is_causal:
+            raise ValueError("memory attention requires an explicit block mask, not is_causal=True")
+        if attn_mask is None or attn_mask.dtype != torch.bool:
+            raise ValueError("memory attention requires a bool attn_mask (True = allowed)")
         qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         rope_options = dict(corrected_frequency_pairing=self.corrected_frequency_pairing)
         if self.interpolate_rope:
+            if (H_patches is None) != (W_patches is None):
+                raise ValueError("supply both H_patches and W_patches")
             rope_options.update(
                 spatial_grid=(self.grid_size, self.grid_size) if H_patches is None else (H_patches, W_patches),
                 canonical_spatial_grid=self.canonical_spatial_grid,
@@ -438,10 +450,19 @@ class RoPEAttention(nn.Module):
         k = apply_3d_rope(k, position_coords, **rope_options)
         key, value = k, v
         if prefix_kv is not None:
+            if not isinstance(prefix_kv, LayerKV):
+                raise ValueError("prefix_kv must be a LayerKV with already-rotated keys")
             pk, pv = prefix_kv.key, prefix_kv.value
+            if (pk.shape[0], pk.shape[1], pk.shape[3]) != (batch, self.num_heads, self.head_dim):
+                raise ValueError("prefix_kv batch/heads/head_dim must match current KV")
+            if pk.dtype != k.dtype or pk.device != k.device:
+                raise ValueError("prefix_kv dtype/device must match projected current KV")
             # No mutation, detach, re-projection or second rotation of prefix.
             key = torch.cat((pk, k), dim=2)
             value = torch.cat((pv, v), dim=2)
+        expected = (batch, 1, tokens, key.shape[2])
+        if attn_mask.shape != expected or attn_mask.device != x.device:
+            raise ValueError(f"memory attn_mask must have shape {expected} on the query device")
         row_valid = attn_mask.any(dim=-1, keepdim=True)
         # All-masked padding rows must be safe even for backends whose softmax
         # returns NaN. Temporarily allow one key, then remove its output/gradient.

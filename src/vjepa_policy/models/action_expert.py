@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Beta
 
+from .backbone.rope import apply_3d_rope
+from .memory_types import LayerKV
+
 
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim):
@@ -64,7 +67,14 @@ class PredictorKVActionAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, inner_dim)
         self.o_proj = nn.Linear(inner_dim, hidden_size)
 
-    def forward(self, action_hidden, context_key, context_value):
+    def forward(self, action_hidden, context_key, context_value, *,
+                context_valid=None, action_valid=None, action_position_coords=None,
+                rope_options=None):
+        memory = any(item is not None for item in (
+            context_valid, action_valid, action_position_coords, rope_options
+        ))
+        if memory:
+            action_hidden = action_hidden.masked_fill(~action_valid[..., None], 0)
         batch_size, action_length, _ = action_hidden.shape
         query = self.q_proj(action_hidden).view(
             batch_size, action_length, self.num_heads, self.head_dim
@@ -75,13 +85,27 @@ class PredictorKVActionAttention(nn.Module):
         action_value = self.v_proj(action_hidden).view(
             batch_size, action_length, self.num_heads, self.head_dim
         ).transpose(1, 2)
+        if memory:
+            query = apply_3d_rope(query, action_position_coords, **rope_options)
+            action_key = apply_3d_rope(action_key, action_position_coords, **rope_options)
         key = torch.cat((context_key, action_key), dim=2)
         value = torch.cat((context_value, action_value), dim=2)
-        output = F.scaled_dot_product_attention(query, key, value)
+        if memory:
+            allowed = action_valid[:, None, :, None] & torch.cat(
+                (context_valid, action_valid), dim=1
+            )[:, None, None, :]
+            row_valid = allowed.any(-1, keepdim=True)
+            safe = allowed.clone()
+            safe[..., :1] |= ~row_valid
+            output = F.scaled_dot_product_attention(query, key, value, attn_mask=safe)
+            output = output.masked_fill(~row_valid, 0)
+        else:
+            output = F.scaled_dot_product_attention(query, key, value)
         output = output.transpose(1, 2).contiguous().view(
             batch_size, action_length, -1
         )
-        return self.o_proj(output)
+        output = self.o_proj(output)
+        return output.masked_fill(~action_valid[..., None], 0) if memory else output
 
 
 class _ReferenceConditionEncoder(nn.Module):
@@ -207,14 +231,23 @@ class ActionExpertBlock(nn.Module):
         t_cond,
         condition_tokens,
         condition_valid,
+        *,
+        context_valid=None,
+        action_valid=None,
+        action_position_coords=None,
+        rope_options=None,
     ):
         normed, attention_gate = self.pre_attn_norm(x, t_cond)
-        x = x + self.attn(normed, ctx_k, ctx_v) * attention_gate
+        x = x + self.attn(
+            normed, ctx_k, ctx_v, context_valid=context_valid, action_valid=action_valid,
+            action_position_coords=action_position_coords, rope_options=rope_options,
+        ) * attention_gate
         x = x + self.condition_attention(
             self.condition_norm(x), condition_tokens, condition_valid
         )
         normed, ffn_gate = self.pre_ffn_norm(x, t_cond)
-        return x + self.ffn(normed) * ffn_gate
+        x = x + self.ffn(normed) * ffn_gate
+        return x.masked_fill(~action_valid[..., None], 0) if action_valid is not None else x
 
 
 class _ActionExpertBase(nn.Module):
@@ -304,6 +337,11 @@ class _ActionExpertBase(nn.Module):
         t_cond,
         condition_tokens,
         condition_valid,
+        *,
+        context_valid=None,
+        action_valid=None,
+        action_position_coords=None,
+        rope_options=None,
     ):
         if len(predictor_kv) != self.num_layers:
             raise ValueError(
@@ -322,9 +360,14 @@ class _ActionExpertBase(nn.Module):
                 t_cond,
                 condition_tokens,
                 condition_valid,
+                context_valid=context_valid,
+                action_valid=action_valid,
+                action_position_coords=action_position_coords,
+                rope_options=rope_options,
             )
         hidden, _ = self.final_norm(hidden, t_cond)
-        return self.out_proj(hidden)
+        output = self.out_proj(hidden)
+        return output.masked_fill(~action_valid[..., None], 0) if action_valid is not None else output
 
     def forward(
         self,
@@ -352,6 +395,12 @@ class _ActionExpertBase(nn.Module):
         )
         return predicted_velocity, target_velocity
 
+    def _initial_actions(self, first_key, *, initial_noise=None, generator=None):
+        shape = (first_key.shape[0], self.action_chunk_size, self.action_dim)
+        if initial_noise is not None:
+            return initial_noise.clone()
+        return torch.randn(shape, device=first_key.device, dtype=first_key.dtype, generator=generator)
+
     @torch.no_grad()
     def predict_action(
         self,
@@ -361,13 +410,12 @@ class _ActionExpertBase(nn.Module):
         state,
         context_len=None,
         dof_mask=None,
+        *,
+        initial_noise=None,
+        generator=None,
     ):
         first_key = predictor_kv[0][0]
-        actions = torch.randn(
-            (first_key.shape[0], self.action_chunk_size, self.action_dim),
-            device=first_key.device,
-            dtype=first_key.dtype,
-        )
+        actions = self._initial_actions(first_key, initial_noise=initial_noise, generator=generator)
         condition_tokens, condition_valid = self.conditioner(lang, lang_mask, state)
         step_size = 1.0 / self.num_inference_steps
         for step in range(self.num_inference_steps):

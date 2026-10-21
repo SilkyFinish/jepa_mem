@@ -79,4 +79,4 @@ python -m unittest discover -s tests -v
 
 ## 下一步
 
-M2 在这些接口上实现 history/future 两阶段 Predictor、逐历史块状态条件，以及 Action Expert 的共享 RoPE 和 H/F 上下文读取。M3 再接入 dataset、构建器、checkpoint 版本检查与训练；持久缓存生命周期后续单独实现。目前训练和服务默认仍进入原版模型。
+M2 已在这些接口上实现 history/future 两阶段 Predictor、逐历史块状态条件，以及 Action Expert 的共享 RoPE 和 H/F 上下文读取，详见 [M2 实现与验证](full_history_v0_m2.md)。M3 再接入 dataset、构建器、checkpoint 版本检查与训练；持久缓存生命周期后续单独实现。目前训练和服务默认仍进入原版模型。
