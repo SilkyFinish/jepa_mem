@@ -1,9 +1,19 @@
 """Episode boundaries and native joint output are critical benchmark contracts."""
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
+
+# These numerical contracts require the installed policy environment.
+# Missing optional packages skip this module; actual import errors still fail.
+_REQUIRED_PACKAGES = ('numpy', 'h5py', 'torch', 'lerobot', 'vjepa_policy')
+_missing = [name for name in _REQUIRED_PACKAGES if importlib.util.find_spec(name) is None]
+if _missing:
+    raise unittest.SkipTest(
+        "Requires policy environment; missing: " + ", ".join(_missing)
+    )
 
 import h5py
 import numpy as np

@@ -1,8 +1,16 @@
+import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
-from vjepa_policy.stopping import deadline_timestamp, stop_requested
+# Load this standard-library helper without importing the ML package initializer.
+spec = importlib.util.spec_from_file_location(
+    "policy_stopping", Path(__file__).parents[1] / "src/vjepa_policy/stopping.py"
+)
+stopping = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stopping)
+deadline_timestamp = stopping.deadline_timestamp
+stop_requested = stopping.stop_requested
 
 
 class TrainingStopping(unittest.TestCase):

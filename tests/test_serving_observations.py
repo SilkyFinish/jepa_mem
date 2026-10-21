@@ -1,4 +1,14 @@
+import importlib.util
 import unittest
+# These numerical contracts require the installed policy environment.
+# Missing optional packages skip this module; actual import errors still fail.
+_REQUIRED_PACKAGES = ('numpy', 'torch', 'lerobot', 'vjepa_policy')
+_missing = [name for name in _REQUIRED_PACKAGES if importlib.util.find_spec(name) is None]
+if _missing:
+    raise unittest.SkipTest(
+        "Requires policy environment; missing: " + ", ".join(_missing)
+    )
+
 import numpy as np
 import torch
 from vjepa_policy.policy_serving.observations import (

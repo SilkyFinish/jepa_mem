@@ -7,6 +7,8 @@ python scripts/check_environment.py --profile source
 python -m unittest discover -s tests -v
 ```
 
+The action-convention, serving-observation, and RMBench numerical test modules require the installed policy environment; RMBench also requires h5py. Standard-library-only environments report these three modules as skipped before importing optional dependencies. In a complete policy environment, the same discovery command runs all tests; unexpected import failures and failed assertions still fail the suite. Training-stop tests load their standard-library helper directly, without importing the ML package initializer.
+
 [GitHub Actions](../.github/workflows/checks.yml) runs this suite on Linux with Python 3.10 and 3.12, plus Python/Bash syntax checks. Tests exercise full and partial LIBERO-Plus result coverage, duplicate/mismatched episodes, cache provenance, language perturbation handling, and LIBERO aggregate counts. Training launchers run against a fake executable to check actual forwarded arguments, global batch validation, and the distinction between fresh and predictor-initialized runs.
 
 These checks do not validate model numerics, GPU memory requirements, MuJoCo rendering, or published success rates. A passing workflow means the lightweight contracts passed; it does not establish benchmark reproduction.
