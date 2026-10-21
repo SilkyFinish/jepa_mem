@@ -92,4 +92,4 @@ source configs/memory_v0.local.env
 
 ## 下一阶段边界
 
-M1 再实现 block-causal mask、共享 RoPE 和 prefix attention；M2 实现可训练的历史/未来/动作路径；M3 接入新版 dataset、构建器与 checkpoint loader。保持原版默认入口，明确选择 v0 后才进入新架构。当前不能使用尚未实现的 `--policy-arch full_history` 启动训练。
+M1 已实现 block-causal mask、共享 RoPE 和 prefix attention，详见 [M1 实现与验证](full_history_v0_m1.md)；M2 实现可训练的历史/未来/动作路径；M3 接入新版 dataset、构建器与 checkpoint loader。保持原版默认入口，明确选择 v0 后才进入新架构。当前不能使用尚未实现的 `--policy-arch full_history` 启动训练。

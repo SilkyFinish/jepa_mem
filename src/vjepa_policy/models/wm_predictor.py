@@ -112,10 +112,16 @@ class WorldModelPredictorBlock(nn.Module):
         H_patches,
         W_patches,
         return_kv=False,
+        attn_mask=None,
+        position_coords=None,
+        prefix_kv=None,
     ):
         attention_output = self.self_attn(
             self.self_norm(x),
             mask=position_ids,
+            attn_mask=attn_mask,
+            position_coords=position_coords,
+            prefix_kv=prefix_kv,
             T=T,
             H_patches=H_patches,
             W_patches=W_patches,

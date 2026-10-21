@@ -8,6 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import drop_path
 
+from vjepa_policy.models.memory_types import LayerKV
+from .rope import (
+    apply_3d_rope,
+    apply_rope_axes,
+    rope_dimensions,
+    rotate_queries_or_keys,
+    validate_position_coords,
+)
+
 
 def build_action_block_causal_attention_mask(T, H, W, add_tokens=1):
     N_T = add_tokens + (H * W)
@@ -21,40 +30,6 @@ def build_action_block_causal_attention_mask(T, H, W, add_tokens=1):
             mask[t1 * N_T : (t1 + 1) * N_T, t2 * N_T : (t2 + 1) * N_T] = mask_block
 
     return mask
-
-
-def rotate_queries_or_keys(x, pos, corrected_frequency_pairing=False):
-    B, num_heads, N, D = x.size()
-    assert D % 2 == 0, "Embedding dimension must be a multiple of 2 for block matrix rotation"
-
-    # -- compute angle for each position
-    omega = torch.arange(D // 2, dtype=x.dtype, device=x.device)
-    omega /= D / 2.0
-    omega = 1.0 / 10000**omega  # (D/2,)
-    freq = torch.einsum("..., f -> ... f", pos, omega)  # (..., N, D/2), outer product
-
-    # -- build rotation matrix and apply
-    emb_sin = freq.sin()  # (..., N, D/2)
-    emb_cos = freq.cos()  # (..., N, D/2)
-    # Preserve the published V-JEPA2 expansion by default for checkpoint compatibility.
-    if corrected_frequency_pairing:
-        emb_sin = emb_sin.repeat_interleave(2, dim=-1)  # (..., N, D)
-        emb_cos = emb_cos.repeat_interleave(2, dim=-1)  # (..., N, D)
-    else:
-        # NOTE: The legacy expansion does not duplicate each frequency within its
-        # rotated channel pair. V-JEPA2 pretrained weights depend on this behavior.
-        # Thanks to @echosprint, original PR: https://github.com/facebookresearch/vjepa2/pull/15
-        emb_sin = emb_sin.squeeze(-1).repeat(1, 1, 1, 2)
-        emb_cos = emb_cos.squeeze(-1).repeat(1, 1, 1, 2)
-
-    # --
-    y = x.unflatten(-1, (-1, 2))
-    y1, y2 = y.unbind(
-        dim=-1,
-    )
-    y = torch.stack((-y2, y1), dim=-1)
-    y = y.flatten(-2)
-    return (x * emb_cos) + (y * emb_sin)
 
 
 class DropPath(nn.Module):
@@ -293,9 +268,7 @@ class RoPEAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_sdpa = use_sdpa
         # --
-        self.d_dim = int(2 * ((head_dim // 3) // 2))
-        self.h_dim = int(2 * ((head_dim // 3) // 2))
-        self.w_dim = int(2 * ((head_dim // 3) // 2))
+        self.d_dim, self.h_dim, self.w_dim = rope_dimensions(head_dim)
         self.grid_size = grid_size
         self.is_causal = is_causal
         self.interpolate_rope = interpolate_rope
@@ -376,7 +349,17 @@ class RoPEAttention(nn.Module):
         W_patches=None,
         kv_out=None,
         return_kv=False,
+        *,
+        position_coords=None,
+        prefix_kv=None,
     ):
+        # Explicit coordinates opt into memory semantics; old calls below keep
+        # the original attention/dropout/position behavior and state_dict keys.
+        if position_coords is not None or prefix_kv is not None:
+            return self._forward_memory(
+                x, position_coords, prefix_kv, attn_mask,
+                H_patches, W_patches, kv_out, return_kv,
+            )
         B, N, C = x.size()
         grid_depth = int(N // (self.grid_size * self.grid_size))
 
@@ -400,53 +383,16 @@ class RoPEAttention(nn.Module):
             W_patches=W_patches,
         )
 
-        s = 0
-        # Rotate depth
-        qd = rotate_queries_or_keys(
-            q[..., s : s + self.d_dim],
-            pos=d_mask,
+        positions = (d_mask, h_mask, w_mask)
+        dimensions = (self.d_dim, self.h_dim, self.w_dim)
+        q = apply_rope_axes(
+            q, positions, dimensions,
             corrected_frequency_pairing=self.corrected_frequency_pairing,
         )
-        kd = rotate_queries_or_keys(
-            k[..., s : s + self.d_dim],
-            pos=d_mask,
+        k = apply_rope_axes(
+            k, positions, dimensions,
             corrected_frequency_pairing=self.corrected_frequency_pairing,
         )
-        s += self.d_dim
-        # Rotate height dim
-        qh = rotate_queries_or_keys(
-            q[..., s : s + self.h_dim],
-            pos=h_mask,
-            corrected_frequency_pairing=self.corrected_frequency_pairing,
-        )
-        kh = rotate_queries_or_keys(
-            k[..., s : s + self.h_dim],
-            pos=h_mask,
-            corrected_frequency_pairing=self.corrected_frequency_pairing,
-        )
-        s += self.h_dim
-        # Rotate width dim
-        qw = rotate_queries_or_keys(
-            q[..., s : s + self.w_dim],
-            pos=w_mask,
-            corrected_frequency_pairing=self.corrected_frequency_pairing,
-        )
-        kw = rotate_queries_or_keys(
-            k[..., s : s + self.w_dim],
-            pos=w_mask,
-            corrected_frequency_pairing=self.corrected_frequency_pairing,
-        )
-        s += self.w_dim
-
-        # Combine rotated dimension
-        if s < self.head_dim:
-            qr = q[..., s:]
-            kr = k[..., s:]
-            q = torch.cat([qd, qh, qw, qr], dim=-1)
-            k = torch.cat([kd, kh, kw, kr], dim=-1)
-        else:
-            q = torch.cat([qd, qh, qw], dim=-1)
-            k = torch.cat([kd, kh, kw], dim=-1)
 
         # Opt-in hook for external modules (e.g. a MoT-style action expert) that
         # need this layer's post-RoPE keys/values as read-only context. No-op
@@ -472,6 +418,55 @@ class RoPEAttention(nn.Module):
         if return_kv:
             return x, k, v
         return x
+
+    def _forward_memory(
+        self, x, position_coords, prefix_kv, attn_mask,
+        H_patches, W_patches, kv_out, return_kv,
+    ):
+        """Read-only [prefix, current] attention; return only current KV."""
+        batch, tokens, channels = x.shape
+        validate_position_coords(position_coords, batch, tokens, x.device)
+        qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        rope_options = dict(corrected_frequency_pairing=self.corrected_frequency_pairing)
+        if self.interpolate_rope:
+            rope_options.update(
+                spatial_grid=(self.grid_size, self.grid_size) if H_patches is None else (H_patches, W_patches),
+                canonical_spatial_grid=self.canonical_spatial_grid,
+            )
+        q = apply_3d_rope(q, position_coords, **rope_options)
+        k = apply_3d_rope(k, position_coords, **rope_options)
+        key, value = k, v
+        if prefix_kv is not None:
+            pk, pv = prefix_kv.key, prefix_kv.value
+            # No mutation, detach, re-projection or second rotation of prefix.
+            key = torch.cat((pk, k), dim=2)
+            value = torch.cat((pv, v), dim=2)
+        row_valid = attn_mask.any(dim=-1, keepdim=True)
+        # All-masked padding rows must be safe even for backends whose softmax
+        # returns NaN. Temporarily allow one key, then remove its output/gradient.
+        safe_mask = attn_mask.clone()
+        safe_mask[..., :1] |= ~row_valid
+        dropout = self.attn_drop.p if self.training else 0.0
+        if self.use_sdpa:
+            output = F.scaled_dot_product_attention(
+                q, key, value, attn_mask=safe_mask, dropout_p=dropout,
+                is_causal=False, scale=self.scale,
+            )
+        else:
+            logits = (q @ key.transpose(-2, -1)) * self.scale
+            weights = logits.masked_fill(~safe_mask, float("-inf")).softmax(dim=-1)
+            output = F.dropout(weights, p=dropout, training=self.training) @ value
+        output = output.masked_fill(~row_valid, 0)
+        output = output.transpose(1, 2).reshape(batch, tokens, channels)
+        output = self.proj_drop(self.proj(output))
+        # Clear projection bias too. Padding residuals/FFNs belong to the caller.
+        output = output.masked_fill(~row_valid[:, 0], 0)
+        if kv_out is not None:
+            kv_out.append((k, v))
+        if return_kv:
+            return output, k, v
+        return output
 
 
 class Attention(nn.Module):
