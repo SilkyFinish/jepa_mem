@@ -25,4 +25,10 @@ SAPIEN 3.0.0b1 on RTX 5090 needs the verified OIDN 2.3.3 CUDA/core-library and l
 
 ## Full-History v0 input checks
 
-For v0 development, read [the M0 contract](../../../docs/full_history_v0_m0.md). Keep the model version v0 separate from schema version 1; preserve the legacy default entry points. Use scripts/check_memory_v0.py with a fresh output directory to verify the canonical input_contract.json and native data. M0 adds input contracts only; do not launch an unimplemented memory policy or claim v0 training/serving readiness from legacy evidence. The memory contract fixes complete episode prefixes, history interval 4, decision interval 16, no additional action shift, and complete future windows.
+For v0 development, read [the M0 contract](../../../docs/full_history_v0_m0.md). Keep the model version v0 separate from schema version 1; preserve the legacy default entry points. Use scripts/check_memory_v0.py with a fresh output directory to verify the canonical input_contract.json and native data. M0 adds input contracts only; consult the later M3/M4 records for implemented training/serving paths and their validation limits. Legacy evidence alone does not establish v0 readiness. The memory contract fixes complete episode prefixes, history interval 4, decision interval 16, no additional action shift, and complete future windows.
+
+## Full-History v0 online serving
+
+Use the shared architecture-dispatching server and the separate `run_memory_client.py` entry point described in [M4](../../../docs/full_history_v0_m4.md). The memory collector starts with [0,0], samples every four executed control steps, retains unacknowledged blocks, and replans every 16 steps. A server acknowledgement must match the session, episode, revision and submitted prefix. Close sessions on episode completion and error; reconnect does not preserve history.
+
+The new client defaults to one trial and 32 control steps as a diagnostic, retaining the native expert-solvable filter and explicit controller label. Native recorded RGB plus a real action request is not a simulator rollout score. Current M4 evidence covers short-prefix FP32 requests before the last boundary fixes; final checks and actual new-client rollouts remain deferred as recorded in the M4 document.

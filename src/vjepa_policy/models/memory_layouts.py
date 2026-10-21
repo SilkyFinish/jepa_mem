@@ -6,7 +6,7 @@ from .memory_types import TokenLayout
 
 
 def visual_layout(end_step, valid, *, grid_height, grid_width, num_views,
-                  temporal_unit_steps=8, target_step=None):
+                  temporal_unit_steps=8, target_step=None, block_offset=0):
     """Expand [B,K] cutoff/validity to [B,K*V*H*W]; target_step sets RoPE time."""
     if end_step.ndim != 2 or end_step.dtype != torch.long:
         raise ValueError("end_step must be long [B,K]")
@@ -31,7 +31,7 @@ def visual_layout(end_step, valid, *, grid_height, grid_width, num_views,
     ), dim=-1).reshape(batch, -1, 3)
     return TokenLayout(
         valid=valid[:, :, None].expand(shape).reshape(batch, -1),
-        block_id=torch.arange(groups, device=end_step.device)[None, :, None].expand(shape).reshape(batch, -1),
+        block_id=(torch.arange(groups, device=end_step.device) + block_offset)[None, :, None].expand(shape).reshape(batch, -1),
         end_step=end_step[:, :, None].expand(shape).reshape(batch, -1),
         rope_coords=coords,
         view_id=view.expand(shape).reshape(batch, -1),

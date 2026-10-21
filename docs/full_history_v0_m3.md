@@ -1,5 +1,7 @@
 # Full-History v0 M3：训练接入
 
+后续在线缓存实现及当前验收边界见 [M4 记录](full_history_v0_m4.md)；本文保留 M3 阶段当时的实现与实测结果。
+
 M3 将 M2 的重算模型接入现有训练循环。默认仍为 `--policy-arch legacy`；只有显式选择 `full_history` 才使用新模型、历史数据集和 checkpoint schema。M0 固定输入契约保持不变，当前版本只支持 full-history；current/window 消融和在线 session 缓存分别留给后续实验及 M4。
 
 ## 数据和训练路径

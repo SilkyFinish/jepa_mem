@@ -72,8 +72,14 @@ Use the native v1.0 task ZIP for this adapter. The same Hugging Face repository 
 
 ## Full-History v0 development
 
-The new version starts with the separate [M0 input contract](../../docs/full_history_v0_m0.md). Its check tool validates complete episode-prefix sampling and native data without changing this short-context baseline. M0 does not yet provide a memory model, training launcher, or stateful server.
+The new version starts with the separate [M0 input contract](../../docs/full_history_v0_m0.md). Its check tool validates complete episode-prefix sampling and native data without changing this short-context baseline. M0 itself only defines inputs; later model/training and online-cache work is documented below.
 
 ## Full-History v0 training
 
 The existing RMBench launchers remain the legacy baseline. The explicit full_history Python route adds complete observed prefixes, frozen feature caching and versioned checkpoints; see [M3 integration](../../docs/full_history_v0_m3.md). Its current dense attention backend supports short-prefix diagnostics only; it does not establish a full-history rollout score or replace the native baseline serving protocol.
+
+## Full-History v0 online cache
+
+The shared `serve_policy.py` now selects the legacy or full-history adapter from checkpoint metadata. Use `run_memory_client.py` for the v0 session protocol; keep `run_client.py` for the original baseline. The new client fixes history sampling at 4 control steps and replanning at 16, and defaults to a 32-step diagnostic. See [M4 implementation and status](../../docs/full_history_v0_m4.md) for the cache, protocol, limits, commands and evidence.
+
+M4 has passed short-prefix FP32 numerical and real WebSocket diagnostics on an earlier implementation state. The latest boundary fixes have not been retested, and remaining checks are deferred at the user's request. The new simulator client has not yet completed a real closed-loop evaluation. Raising the configured block limit does not remove the dense-mask limit; long-history capacity and performance remain later work.

@@ -31,3 +31,11 @@ The serving boundary accepts canonical LeRobot keys and OpenPI wire aliases `obs
 Verify the gripper convention separately from image/state shapes: original HDF5 targets use robosuite -1=open/+1=closed, while reference LeRobot targets use 0=closed/1=open. The output decoder resolves explicit override, checkpoint/statistics metadata, then legacy LeRobot default. For older raw-HDF5 weights, explicitly select `--gripper-action-convention robosuite`. Validate normalization plus output decoding against recorded expert actions before claiming rollout scores.
 
 For the native RMBench ALOHA baseline, use the [RMBench skill](../vjepa-policy-rmbench/SKILL.md) and its separate 14D joint-action adapter.
+
+## Full-History v0 sessions
+
+For RMBench memory checkpoints, read [M4 implementation/status](../../../docs/full_history_v0_m4.md). The shared RMBench server dispatches by checkpoint architecture; the legacy adapter remains separate. The memory loader checks saved encoder identity, statistics and text-cache provenance. Use the `rmbench_memory_v0` reset/append/infer/close protocol, with raw two-frame RGB blocks, complete episode prefixes and fixed whole-task instructions. Keep session KV out of training checkpoints.
+
+Validate retries against content and revision, and require finite actions after real observation append; health alone is insufficient. A disconnect frees its sessions, so reconnect requires reset and rebuilding history from episode start. Capacity failures must be explicit, never silent history eviction. The current dense backend and default five-block limit support short diagnostics; they do not establish long-history serving performance.
+
+The M4 record separates the previously passed tests from later untested boundary fixes and lists checks deferred by the user. Do not present those earlier results as full validation of the current implementation.

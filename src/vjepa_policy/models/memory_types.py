@@ -107,3 +107,11 @@ class FutureEncoding:
             raise ValueError("prediction must be [B, Q, D] matching the future layout")
         if self.prediction.device != self.layout.valid.device or not self.prediction.is_floating_point():
             raise ValueError("prediction must be floating point on the layout device")
+
+
+def concatenate_layouts(*layouts):
+    """Join token layouts without renumbering their global block/time coordinates."""
+    return TokenLayout(**{
+        name: torch.cat([getattr(layout, name) for layout in layouts], dim=1)
+        for name in ("valid", "block_id", "end_step", "rope_coords", "view_id")
+    })

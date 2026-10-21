@@ -6,6 +6,7 @@ observations and returns msgpack actions. NumPy arrays use openpi-client's codec
 
 import asyncio
 import logging
+import uuid
 from http import HTTPStatus
 
 from openpi_client import msgpack_numpy
@@ -28,6 +29,7 @@ class WebsocketPolicyServer:
 
     async def handle(self, connection):
         codec = msgpack_numpy.Packer()
+        connection_id = uuid.uuid4().hex
         try:
             await connection.send(codec.pack(self.metadata))
             async for message in connection:
@@ -39,7 +41,9 @@ class WebsocketPolicyServer:
                         raise ValueError("Observation must be a mapping")
                     # Keep inference serialized: a single policy can own mutable
                     # history/RNG state and is not assumed to be thread-safe.
-                    prediction = self.policy.infer(observation)
+                    handler = getattr(self.policy, "infer_connection", None)
+                    prediction = (handler(observation, connection_id) if handler is not None
+                                  else self.policy.infer(observation))
                     await connection.send(codec.pack(prediction))
                 except ConnectionClosed:
                     return
@@ -51,6 +55,11 @@ class WebsocketPolicyServer:
                     return
         except ConnectionClosed:
             return
+
+        finally:
+            cleanup = getattr(self.policy, "on_disconnect", None)
+            if cleanup is not None:
+                cleanup(connection_id)
 
     async def run(self):
         async with serve(

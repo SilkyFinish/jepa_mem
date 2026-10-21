@@ -1,10 +1,10 @@
-"""History/future-separated Predictor. No persistent state or KV cache."""
+"""History/future-separated Predictor; persistent cache ownership stays in serving."""
 
 import torch
 from torch.utils.checkpoint import checkpoint
 
 from .memory_masks import history_attention_mask, future_attention_mask
-from .memory_types import HistoryEncoding, FutureEncoding, LayerKV
+from .memory_types import HistoryEncoding, FutureEncoding, LayerKV, concatenate_layouts
 from .wm_predictor import WorldModelPredictor
 
 
@@ -49,11 +49,11 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         valid = first_valid[:, None].expand(-1, blocks, -1)
         return condition.flatten(0, 1), valid.flatten(0, 1)
 
-    def _history_block(self, block, tokens, condition, condition_valid, layout, mask, blocks):
+    def _history_block(self, block, tokens, condition, condition_valid, layout, mask, blocks, prefix=None):
         output, key, value = block.self_attn(
             block.self_norm(tokens), position_coords=layout.rope_coords,
             attn_mask=mask, H_patches=self.grid_height, W_patches=self.grid_width,
-            return_kv=True,
+            return_kv=True, prefix_kv=prefix,
         )
         tokens = tokens + block.drop_path(output)
         batch, _, width = tokens.shape
@@ -86,6 +86,32 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
                 tokens, key, value = checkpoint(self._history_block, *args, use_reentrant=False)
             else:
                 tokens, key, value = self._history_block(*args)
+            layers.append(LayerKV(key, value))
+        return HistoryEncoding(tuple(layers), layout)
+
+    @torch.no_grad()
+    def append_history(self, prefix, observed_latents, history_state, language,
+                       language_mask, history_layout):
+        """Compute only new H tokens; return a staged delta, never mutate prefix.
+
+        Each new block reads the old prefix and earlier new blocks. Its own
+        state is used at every layer, exactly as in forward_history.
+        """
+        batch, blocks, patches, _ = observed_latents.shape
+        layout = history_layout
+        offset = 0 if prefix is None else prefix.layout.valid.shape[1] // patches
+        key_layout = layout if prefix is None else concatenate_layouts(prefix.layout, layout)
+        mask = history_attention_mask(layout, key_layout)
+        tokens = self._memory_view_embeddings(
+            self.predictor_embed(observed_latents).flatten(1, 2), layout,
+        )
+        condition, condition_valid = self._history_condition(history_state, language, language_mask)
+        layers = []
+        for index, block in enumerate(self.predictor_blocks):
+            tokens, key, value = self._history_block(
+                block, tokens, condition, condition_valid, layout, mask, blocks,
+                None if prefix is None else prefix.layers[index],
+            )
             layers.append(LayerKV(key, value))
         return HistoryEncoding(tuple(layers), layout)
 
