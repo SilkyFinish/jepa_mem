@@ -1,0 +1,74 @@
+{
+  "policy_arch": "full_history",
+  "model_version": "v0",
+  "schema_version": 1,
+  "batch_schema": "rmbench_history_v0",
+  "encoder": "vjepa2_1_vitl",
+  "cameras": [
+    "cam_head",
+    "cam_left_wrist",
+    "cam_right_wrist"
+  ],
+  "view_layout": "independent",
+  "image_size": 224,
+  "source_image_shape": [
+    240,
+    320,
+    3
+  ],
+  "image_mean": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "image_std": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "resize_mode": "stretch",
+  "action_normalization": "QUANTILE",
+  "state_normalization": "QUANTILE",
+  "patch_size": 16,
+  "tubelet_size": 2,
+  "observation_offsets": [
+    -4,
+    0
+  ],
+  "history_interval_steps": 4,
+  "decision_interval_steps": 16,
+  "target_offsets": [
+    -4,
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28,
+    32
+  ],
+  "action_horizon": 32,
+  "action_dim": 14,
+  "raw_state_dim": 14,
+  "max_state_dim": 48,
+  "text_length": 128,
+  "text_dim": 4096,
+  "temporal_unit_steps": 8,
+  "time_basis": "frame_or_control_index",
+  "visual_position_rule": "tubelet_right_edge",
+  "action_position_rule": "target_state_time",
+  "state_conditioning": "per_history_block",
+  "history_scope": "episode_start_to_decision",
+  "tail_policy": "require_full_future_window",
+  "action_contract": "aloha_absolute_joint_14",
+  "action_label_shift": 0,
+  "gripper_indices": [
+    6,
+    13
+  ],
+  "gripper_open_value": 1,
+  "instruction_scope": "whole_task",
+  "action_reads_future": true
+}

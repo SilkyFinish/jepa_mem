@@ -22,3 +22,7 @@ Record the controller explicitly: native_qpos is TOPP-based benchmark execution,
 Use a short HDD TMPDIR for DataLoader/planner IPC sockets and close HDF5 handles explicitly. Verify the CUDA_HOME include/lib layout when building against a conda CUDA toolkit.
 
 SAPIEN 3.0.0b1 on RTX 5090 needs the verified OIDN 2.3.3 CUDA/core-library and loader fix. Preserve native ray-tracing settings, record loaded library hashes, and compare real RGB with the released dataset. Clean tasks also import the global object metadata JSON files. Use the native v1.0 ZIP rather than mixing it with legacy individual HDF5 files.
+
+## Full-History v0 input checks
+
+For v0 development, read [the M0 contract](../../../docs/full_history_v0_m0.md). Keep the model version v0 separate from schema version 1; preserve the legacy default entry points. Use scripts/check_memory_v0.py with a fresh output directory to verify the canonical input_contract.json and native data. M0 adds input contracts only; do not launch an unimplemented memory policy or claim v0 training/serving readiness from legacy evidence. The memory contract fixes complete episode prefixes, history interval 4, decision interval 16, no additional action shift, and complete future windows.

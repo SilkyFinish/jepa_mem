@@ -69,3 +69,7 @@ Keep temporary-directory paths short on HDD: Python DataLoader workers create AF
 On RTX 5090, the bundled SAPIEN 3.0.0b1 OIDN 2.0.1 libraries can report CUDA-device errors. The verified local preparation uses the [upstream SAPIEN fix](https://github.com/haosulab/SAPIEN/issues/243): official OIDN 2.3.3 CUDA/core libraries and the matching loader version, retaining native ray tracing and OIDN denoising. Record library hashes and verify the actually loaded versions and RGB output. The clean task still imports the global object metadata files `objects/objaverse/list.json`, `objects/same.json`, and `objects/points_info.json`; download these alongside task assets.
 
 Use the native v1.0 task ZIP for this adapter. The same Hugging Face repository also exposes older individual HDF5 files with a different layout; keep those formats separate.
+
+## Full-History v0 development
+
+The new version starts with the separate [M0 input contract](../../docs/full_history_v0_m0.md). Its check tool validates complete episode-prefix sampling and native data without changing this short-context baseline. M0 does not yet provide a memory model, training launcher, or stateful server.
