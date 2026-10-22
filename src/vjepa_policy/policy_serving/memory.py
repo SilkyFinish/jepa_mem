@@ -124,7 +124,7 @@ class MemoryPolicyServing:
 
     @property
     def metadata(self):
-        return {"policy_arch": "full_history", "model_version": "v0", "protocol": PROTOCOL,
+        return {"policy_arch": "full_history", "model_version": self.config.model_version, "protocol": PROTOCOL,
                 "action_dim": 14, "action_contract": self.config.action_contract,
                 "cache_backend": self.backend, "memory_schema": self.config.to_dict(),
                 "max_history_blocks": self.max_history_blocks}
@@ -219,7 +219,8 @@ class MemoryPolicyServing:
     def _reset(self, sid, request, owner):
         if len(self.sessions) >= self.max_sessions:
             raise HistoryCacheError("session_capacity_exceeded", "maximum active sessions reached")
-        if request["protocol"] != PROTOCOL or FullHistoryV0Config.from_dict(request["sampling_config"]) != self.config:
+        # The wire sampling protocol is unchanged by history feature compression.
+        if request["protocol"] != PROTOCOL or FullHistoryV0Config.from_dict(request["sampling_config"]) != FullHistoryV0Config():
             raise ValueError("memory protocol/sampling configuration mismatch")
         episode_id = _identifier(request["episode_id"], "episode_id")
         instruction = request["instruction"]
@@ -282,9 +283,8 @@ class MemoryPolicyServing:
     def _layout(self, count, offset=0):
         ends = torch.arange(offset, offset + count, device=self.device)[None] * self.config.history_interval_steps
         p = self.model.predictor
-        return visual_layout(ends, torch.ones_like(ends, dtype=torch.bool),
-                             grid_height=p.grid_height, grid_width=p.grid_width, num_views=p.num_views,
-                             temporal_unit_steps=self.config.temporal_unit_steps, block_offset=offset)
+        return p.history_layout(ends, torch.ones_like(ends, dtype=torch.bool),
+                                temporal_unit_steps=self.config.temporal_unit_steps, block_offset=offset)
 
     def _append(self, sid, session, request):
         cache = session.cache
@@ -317,7 +317,8 @@ class MemoryPolicyServing:
         p = self.model.predictor
         total_tokens = (len(cache.records) + len(new)) * p.tokens_per_history_block
         query_tokens = total_tokens if replace else len(new) * p.tokens_per_history_block
-        if max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS:
+        if (p.attention_backend == "dense" and
+                max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS):
             raise HistoryCacheError("history_capacity_exceeded", "dense reference mask budget exceeded; M5 backend required")
         encoded = [self._encode_block(block) for block, _ in new]
         records = tuple(HistoryBlock(block["block_id"], block["end_step"], digest, item[1])

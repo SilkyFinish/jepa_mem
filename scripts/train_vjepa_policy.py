@@ -86,6 +86,8 @@ def parse_args(argv=None):
     preliminary = parser.parse_args(argv)
     if preliminary.policy_arch == "full_history":
         set_history_defaults(parser)
+    elif preliminary.history_model_version != "v0":
+        parser.error("--history-model-version v1 requires --policy-arch full_history")
     return parser.parse_args(argv)
 
 
@@ -276,7 +278,7 @@ def main(
     encoder_builder = encoder_builder or build_frozen_encoder
     dataset_collator_builder = dataset_collator_builder or build_dataset_collator
     if full_history:
-        validate_history_args(args)
+        history_config = validate_history_args(args)
         from vjepa_policy.models.memory_predictor import MemoryWorldModelPredictor
         from vjepa_policy.models.memory_policy import build_full_history_policy
         policy_builder = policy_builder or build_full_history_policy
@@ -406,6 +408,7 @@ def main(
         )
     if full_history:
         predictor_kwargs["attention_backend"] = args.history_attention_backend
+        predictor_kwargs["history_spatial_pool"] = history_config.history_pool_size
     predictor = predictor_builder(**predictor_kwargs)
     policy_kwargs = dict(
         action_dim=args.action_dim,
@@ -427,7 +430,7 @@ def main(
     )
     if full_history:
         model = policy_builder(
-            encoder, predictor, action_hidden_size=args.action_hidden_size,
+            encoder, predictor, config=history_config, action_hidden_size=args.action_hidden_size,
             condition_num_heads=args.condition_num_heads,
             action_num_inference_steps=args.action_num_inference_steps,
             action_loss_weight=args.action_loss_weight,
@@ -534,7 +537,7 @@ def main(
         if getattr(dataset, "batch_schema", None) != policy_caps.batch_schema:
             raise ValueError("History policy requires the history dataset/collator contract")
         if args.history_attention_backend == "dense":
-            validate_reference_capacity(dataset, args.batch_size)
+            validate_reference_capacity(dataset, args.batch_size, history_config)
         model.training_data_provenance = dataset.provenance
     run_training(args, model, dataset, collator)
 

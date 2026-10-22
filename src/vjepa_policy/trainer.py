@@ -14,6 +14,7 @@ import json
 import os
 import time
 import warnings
+from pathlib import Path
 
 import torch
 from accelerate import Accelerator
@@ -22,6 +23,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Sampler
 
 from vjepa_policy.stopping import deadline_timestamp, stop_requested
+from vjepa_policy.training_state import atomic_torch_save, capture_rng, restore_rng, resume_contract
 from vjepa_policy.utils.logging import get_logger
 
 logger = get_logger(__name__, force=True)
@@ -143,6 +145,9 @@ class Trainer:
         self.cfg = cfg
         self.stop_at = deadline_timestamp(cfg.get("stop_at"))
         self.stop_file = cfg.get("stop_file")
+        self.stop_after_step = cfg.get("stop_after_step")
+        if self.stop_after_step is not None and (type(self.stop_after_step) is not int or self.stop_after_step <= 0):
+            raise ValueError("stop_after_step must be a positive absolute optimizer step")
         self.output_dir = cfg["output_dir"]
         self.max_grad_norm = cfg["max_grad_norm"]
         os.makedirs(self.output_dir, exist_ok=True)
@@ -269,6 +274,8 @@ class Trainer:
         self.log_every = cfg["log_every"]
         self.save_every = cfg["save_every"]
         self.global_step = 0
+        self._microbatches_in_epoch = 0
+        self._resume_rng = None
         self._proc = psutil.Process(os.getpid()) if psutil is not None else None
         self._peak_tree_rss = 0
         self._maybe_resume(cfg.get("resume_from"))
@@ -290,14 +297,17 @@ class Trainer:
         )
 
     def _maybe_resume(self, resume_from):
-        """Continue an interrupted run from a {predictor, action_expert, step}
-        checkpoint: reload the trainable weights, jump global_step forward, and
-        fast-forward the LR scheduler to that step. The optimizer moments are NOT
-        restored (they aren't checkpointed) -- AdamW re-estimates them within a
-        few dozen steps, a negligible perturbation mid-schedule."""
+        """Restore full optimizer-boundary state, or load a legacy weight export.
+
+        Weight-only exports retain the old schedule-fast-forward behavior; they
+        are warm restarts, not exact continuation of the original optimizer.
+        """
         if not resume_from:
             return
-        ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
+        ckpt = torch.load(resume_from, map_location="cpu", weights_only=False, mmap=True)
+        state = ckpt.get("training_state")
+        if state is not None and (state.get("version") != 1 or state["contract"] != resume_contract(self)):
+            raise ValueError("Full training resume requires the same data, world size, batch, seeds and schedule")
         if self.cfg["mixed_precision"] == "no":
             if ckpt.get("train_precision") != "no" or ckpt.get("allow_tf32") is not False:
                 raise ValueError(
@@ -310,6 +320,22 @@ class Trainer:
         load_policy_weights(core, ckpt)
         logger.info("[resume] architecture validated; trainable weights loaded strictly")
         self.global_step = int(ckpt.get("step", 0))
+        if state is not None:
+            self.optimizer.load_state_dict(state["optimizer"])
+            self.scheduler.load_state_dict(state["scheduler"])
+            if self.accelerator.scaler is not None:
+                self.accelerator.scaler.load_state_dict(state["scaler"])
+            self._epoch_sampler.start_epoch(state["epoch"])
+            self._microbatches_in_epoch = state["microbatches_in_epoch"]
+            if self._microbatches_in_epoch >= self.usable_microbatches_per_epoch:
+                self._epoch_sampler.start_epoch(state["epoch"] + 1)
+                self._microbatches_in_epoch = 0
+            self._epoch_sampler.set_position(self._microbatches_in_epoch *
+                                            self.accelerator.num_processes * self.cfg["batch_size"])
+            self._resume_rng = state["rank_rng"][self.accelerator.process_index]
+            logger.info("[resume] full state step=%d epoch=%d microbatch=%d",
+                        self.global_step, self._epoch_sampler.epoch, self._microbatches_in_epoch)
+            return
         # Replay the scheduler's external .step() calls so the LR resumes at the
         # right point (AcceleratedScheduler handles the internal num_processes
         # scaling per external step, matching the live training loop).
@@ -362,7 +388,17 @@ class Trainer:
         return SequentialLR(optimizer, schedulers=[warm, cosine], milestones=[warmup])
 
     def _save(self):
+        rank_rng = None
+        if self.cfg.get("save_training_state"):
+            local_rng = capture_rng()
+            if torch.distributed.is_initialized():
+                rank_rng = [None] * self.accelerator.num_processes
+                torch.distributed.all_gather_object(rank_rng, local_rng)
+            else:
+                rank_rng = [local_rng]
         if not self.accelerator.is_main_process:
+            if self.cfg.get("save_training_state"):
+                self.accelerator.wait_for_everyone()
             return
         core = self.accelerator.unwrap_model(self.model)
         path = os.path.join(self.output_dir, f"checkpoint_step{self.global_step:06d}.pt")
@@ -569,15 +605,33 @@ class Trainer:
             payload.update(memory_checkpoint_metadata(core))
         if self.cfg.get("training_stage"):
             payload["training_stage"] = self.cfg["training_stage"]
-        temp_path = f"{path}.tmp.{os.getpid()}"
-        torch.save(payload, temp_path)
-        os.replace(temp_path, path)
+        atomic_torch_save(payload, path)
+        if rank_rng is not None:
+            payload["training_state"] = {
+                "version": 1, "contract": resume_contract(self),
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "scaler": self.accelerator.scaler.state_dict() if self.accelerator.scaler else None,
+                "epoch": self._epoch_sampler.epoch,
+                "microbatches_in_epoch": self._microbatches_in_epoch,
+                "rank_rng": rank_rng,
+            }
+            atomic_torch_save(payload, os.path.join(self.output_dir, "resume_state.pt"))
+            self.accelerator.wait_for_everyone()
+        keep = self.cfg.get("keep_last_checkpoints", 0)
+        if keep > 0:
+            paths = sorted(Path(self.output_dir).glob("checkpoint_step*.pt"))
+            protected = {f"checkpoint_step{s:06d}.pt" for s in self.cfg.get("checkpoint_milestones", [])}
+            for old in paths[:-keep]:
+                if old.name not in protected:
+                    old.unlink()
         logger.info("[ckpt] saved %s", path)
 
     def _stop_requested(self):
-        if self.stop_at is None and not self.stop_file:
+        if self.stop_at is None and not self.stop_file and self.stop_after_step is None:
             return False
-        local = stop_requested(self.stop_at, self.stop_file)
+        local = (self.stop_after_step is not None and self.global_step >= self.stop_after_step)
+        local = local or stop_requested(self.stop_at, self.stop_file)
         flag = torch.tensor([int(local)], device=self.accelerator.device)
         # Every rank takes the same branch, even across a deadline boundary.
         return bool(self.accelerator.reduce(flag, reduction="sum").item())
@@ -604,8 +658,12 @@ class Trainer:
                 )
 
         start = time.perf_counter()
+        start_step = self.global_step
         data_iter = iter(self.loader)
-        microbatches_in_epoch = 0
+        if self._resume_rng is not None:
+            restore_rng(self._resume_rng)
+            self._resume_rng = None
+        microbatches_in_epoch = self._microbatches_in_epoch
         steps_since_recycle = 0
         precision_verified = False
         stopped = self._stop_requested()
@@ -625,6 +683,7 @@ class Trainer:
                     f"({microbatches_in_epoch}/{self.usable_microbatches_per_epoch})"
                 )
             microbatches_in_epoch += 1
+            self._microbatches_in_epoch = microbatches_in_epoch
             if not precision_verified and self.cfg["mixed_precision"] == "no":
                 pending = [("batch", batch)]
                 non_fp32_inputs = {}
@@ -646,6 +705,11 @@ class Trainer:
                     )
             with self.accelerator.accumulate(self.model):
                 loss, metrics = self.model(batch)
+                # Check every rank locally. A collective here would force long-
+                # history stragglers to synchronize even during no_sync accumulation.
+                # torchrun propagates a failing rank's exit to its peers.
+                if not torch.isfinite(loss.detach()).item():
+                    raise FloatingPointError("Nonfinite training loss")
                 if not precision_verified and self.cfg["mixed_precision"] == "no":
                     dtypes = getattr(core, "forward_dtypes", {})
                     non_fp32 = {name: dtype for name, dtype in dtypes.items() if dtype != torch.float32}
@@ -659,6 +723,8 @@ class Trainer:
                 self.accelerator.backward(loss)
                 if self.accelerator.sync_gradients:
                     grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    if not bool(torch.isfinite(grad_norm)):
+                        raise FloatingPointError("Nonfinite gradient norm")
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
@@ -680,7 +746,15 @@ class Trainer:
                             gamma = core.film_gamma_abs.float().cpu()
                             beta = core.film_beta_abs.float().cpu()
                         if self.accelerator.is_main_process:
-                            speed = self.global_step / max(time.perf_counter() - start, 1e-6)
+                            speed = (self.global_step - start_step) / max(time.perf_counter() - start, 1e-6)
+                            progress = dict(step=self.global_step, max_steps=self.max_steps,
+                                            epoch=self.global_step / self.optimizer_steps_per_epoch,
+                                            seconds_per_step=1 / speed,
+                                            eta_seconds=(self.max_steps - self.global_step) / speed,
+                                            loss=g, grad_norm=float(grad_norm), updated_at=time.time())
+                            progress_path = Path(self.output_dir) / "progress.json"
+                            progress_path.with_suffix(".tmp").write_text(json.dumps(progress, indent=2) + "\n")
+                            progress_path.with_suffix(".tmp").replace(progress_path)
                             extra = f" (world={gw:.4f} action={ga:.4f})" if has_action else ""
                             message = (
                                 "step=%d/%d loss=%.4f%s cos_sim=%.4f grad_norm=%.3f "
@@ -739,7 +813,8 @@ class Trainer:
                                         payload[f"film/gamma_abs_L{i:02d}"] = gamma[i].item()
                                         payload[f"film/beta_abs_L{i:02d}"] = beta[i].item()
                                 self.wandb_run.log(payload, step=self.global_step)
-                    if self.save_every > 0 and self.global_step % self.save_every == 0:
+                    if ((self.save_every > 0 and self.global_step % self.save_every == 0)
+                            or self.global_step in self.cfg.get("checkpoint_milestones", [])):
                         self._save()
                     stopped = self._stop_requested()
                     if stopped and self.accelerator.is_main_process:
@@ -774,11 +849,14 @@ class Trainer:
         if self.accelerator.is_main_process:
             result = {
                 "completed": self.global_step >= self.max_steps,
-                "stop_reason": "max_steps" if self.global_step >= self.max_steps else "stop_requested",
+                "stop_reason": ("max_steps" if self.global_step >= self.max_steps else
+                                "stage_boundary" if self.stop_after_step is not None and self.global_step >= self.stop_after_step
+                                else "stop_requested"),
                 "step": self.global_step, "max_steps": self.max_steps,
                 "optimizer_steps_per_epoch": self.optimizer_steps_per_epoch,
                 "checkpoint": f"checkpoint_step{self.global_step:06d}.pt",
-                "optimizer_state_saved": False,
+                "optimizer_state_saved": bool(self.cfg.get("save_training_state")),
+                "resume_state": "resume_state.pt" if self.cfg.get("save_training_state") else None,
             }
             result_path = os.path.join(self.output_dir, "training_result.json")
             temporary = result_path + ".tmp"

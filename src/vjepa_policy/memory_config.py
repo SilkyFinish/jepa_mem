@@ -1,8 +1,4 @@
-"""M0 contracts for Full-History v0. No model imports or legacy defaults change.
-
-Model version (v0) and serialization schema version (1) are independent.
-These declarations do not implement a trainable memory policy.
-"""
+"""Versioned full-history contracts; v0 input sampling and defaults are stable."""
 from dataclasses import asdict, dataclass, fields
 from hashlib import sha256
 import json
@@ -68,7 +64,16 @@ class FullHistoryV0Config:
 
     @property
     def tokens_per_block(self):
+        """Uncompressed frozen Encoder tokens (also the cache format)."""
         return len(self.cameras) * (self.image_size // self.patch_size) ** 2
+
+    @property
+    def history_pool_size(self):
+        return getattr(self, "history_spatial_pool", 1)
+
+    @property
+    def history_tokens_per_block(self):
+        return self.tokens_per_block // self.history_pool_size ** 2
 
     @property
     def future_tokens(self):
@@ -164,6 +169,24 @@ class FullHistoryV0Config:
         }
 
 
+@dataclass(frozen=True)
+class FullHistoryV1Config(FullHistoryV0Config):
+    """Same full temporal prefix/targets, with per-view 2x2 average pooling of H."""
+
+    model_version: str = "v1"
+    history_spatial_pool: int = 2
+    history_compression: str = "per_view_avg_pool_before_predictor"
+    history_spatial_position: str = "original_patch_centers"
+
+
+def full_history_config(version="v0"):
+    if version == "v0":
+        return FullHistoryV0Config()
+    if version == "v1":
+        return FullHistoryV1Config()
+    raise ValueError(f"Unsupported full-history model version: {version!r}")
+
+
 def _integer(name, value, minimum=0):
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}")
@@ -182,9 +205,10 @@ def contract_from_checkpoint_metadata(metadata):
         if "memory_schema" in metadata or "model_version" in metadata:
             raise ValueError("Legacy checkpoint contains incompatible memory version markers")
         return None
-    if arch != "full_history" or metadata.get("model_version") != "v0":
+    if arch != "full_history" or metadata.get("model_version") not in ("v0", "v1"):
         raise ValueError("Unsupported policy architecture/model version")
-    config = FullHistoryV0Config.from_dict(metadata.get("memory_schema"))
+    cls = type(full_history_config(metadata["model_version"]))
+    config = cls.from_dict(metadata.get("memory_schema"))
     if config.policy_arch != arch or config.model_version != metadata["model_version"]:
         raise ValueError("Checkpoint architecture and memory schema disagree")
     return config

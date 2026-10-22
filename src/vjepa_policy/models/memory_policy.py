@@ -30,6 +30,8 @@ class FullHistoryVJEPAPolicy(nn.Module):
                  world_loss_weight=1.0, action_loss_weight=1.0):
         super().__init__()
         self.config = config or FullHistoryV0Config()
+        if predictor.history_spatial_pool != self.config.history_pool_size:
+            raise ValueError("Predictor history pooling differs from the model-version contract")
         self.encoder, self.predictor, self.action_expert = encoder, predictor, action_expert
         self.encoder_batch_size = encoder_batch_size
         self.strict_v0_inputs = strict_v0_inputs
@@ -109,7 +111,7 @@ class FullHistoryVJEPAPolicy(nn.Module):
     def encode_observed_blocks(self, batch):
         valid = batch["history_valid"]
         batch_size, blocks = valid.shape
-        patches, width = self.predictor.tokens_per_history_block, self.predictor.predictor_embed.in_features
+        patches, width = self.predictor.tokens_per_observation_block, self.predictor.predictor_embed.in_features
         if "history_latents" in batch:
             latents = batch["history_latents"].detach()
         else:
@@ -144,7 +146,7 @@ class FullHistoryVJEPAPolicy(nn.Module):
             self.encoder.eval()
             target = encode_video_views(self.encoder, video)
             target = F.layer_norm(target, (target.shape[-1],))
-            target = target[:, self.predictor.tokens_per_history_block:]
+            target = target[:, self.predictor.tokens_per_observation_block:]
         valid = batch["future_valid"]
         return target.masked_fill(~valid[..., None], 0)
 
@@ -154,9 +156,7 @@ class FullHistoryVJEPAPolicy(nn.Module):
         packed_history = pack_normalized_state(raw_state, self.config.max_state_dim)
         packed_history = packed_history.masked_fill(~valid[..., None], 0)
         packed_current = pack_normalized_state(batch["current_state"], self.config.max_state_dim)
-        geometry = dict(grid_height=self.predictor.grid_height, grid_width=self.predictor.grid_width,
-                        num_views=self.predictor.num_views, temporal_unit_steps=self.config.temporal_unit_steps)
-        hl = visual_layout(ends, valid, **geometry)
+        hl = self.predictor.history_layout(ends, valid, temporal_unit_steps=self.config.temporal_unit_steps)
         z = self.encode_observed_blocks(batch)
         history = self.predictor.forward_history(z, packed_history, language, batch["language_mask"], hl)
         return history, packed_current, language, z.dtype

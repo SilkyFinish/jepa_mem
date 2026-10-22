@@ -1,11 +1,13 @@
 """CLI contract for the native RMBench Full-History v0 training route."""
-from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.memory_config import FullHistoryV0Config, full_history_config
 
 HISTORY_FACTORY = "vjepa_policy.datasets.rmbench_history:build_dataset"
 
 
 def add_history_args(parser):
     parser.add_argument("--policy-arch", choices=("legacy", "full_history"), default="legacy")
+    parser.add_argument("--history-model-version", choices=("v0", "v1"), default="v0",
+                        help="v0: full spatial history; v1: per-view 2x2 average-pooled history")
     parser.add_argument("--history-feature-cache", help="Frozen observation/target cache manifest")
     parser.add_argument("--history-episode-ids", nargs="+", help="Explicit diagnostic episode selection")
     parser.add_argument("--history-max-decision-step", type=int,
@@ -32,7 +34,7 @@ def set_history_defaults(parser):
 
 
 def validate_history_args(args):
-    config = FullHistoryV0Config()
+    config = full_history_config(getattr(args, "history_model_version", "v0"))
     fixed = dict(
         encoder=config.encoder, encoder_family="vjepa2_1", model_name="vit_large",
         encoder_checkpoint_key="ema_encoder", crop_size=224, patch_size=16, tubelet_size=2,
@@ -76,11 +78,11 @@ def validate_predictor_transfer(checkpoint, predictor):
             raise ValueError(f"Predictor transfer requires source {key}={value!r}; metadata missing or incompatible")
 
 
-def validate_reference_capacity(dataset, batch_size):
+def validate_reference_capacity(dataset, batch_size, config=None):
     """Fail before training, rather than hitting a late decision mid-epoch."""
     from vjepa_policy.models.memory_masks import DEFAULT_MAX_MASK_ELEMENTS
-    config = FullHistoryV0Config()
-    history = max(dataset.history_lengths) * config.tokens_per_block
+    config = config or FullHistoryV0Config()
+    history = max(dataset.history_lengths) * config.history_tokens_per_block
     future, action = config.future_tokens, config.action_horizon
     elements = batch_size * max(history * history, future * (history + future),
                                 action * (history + future + action))

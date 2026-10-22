@@ -6,7 +6,7 @@ from .memory_types import TokenLayout
 
 
 def visual_layout(end_step, valid, *, grid_height, grid_width, num_views,
-                  temporal_unit_steps=8, target_step=None, block_offset=0):
+                  temporal_unit_steps=8, target_step=None, block_offset=0, spatial_stride=1):
     """Expand [B,K] cutoff/validity to [B,K*V*H*W]; target_step sets RoPE time."""
     if end_step.ndim != 2 or end_step.dtype != torch.long:
         raise ValueError("end_step must be long [B,K]")
@@ -14,6 +14,8 @@ def visual_layout(end_step, valid, *, grid_height, grid_width, num_views,
         raise ValueError("valid must be bool [B,K]")
     if min(grid_height, grid_width, num_views, temporal_unit_steps) <= 0:
         raise ValueError("layout dimensions and temporal unit must be positive")
+    if type(spatial_stride) is not int or spatial_stride < 1:
+        raise ValueError("spatial_stride must be a positive integer")
     target_step = end_step if target_step is None else target_step
     if target_step.shape != end_step.shape:
         raise ValueError("target_step must match end_step")
@@ -27,7 +29,8 @@ def visual_layout(end_step, valid, *, grid_height, grid_width, num_views,
     shape = (batch, groups, per_block)
     coords = torch.stack((
         (target_step.float() / temporal_unit_steps)[:, :, None].expand(shape),
-        height.expand(shape).float(), width.expand(shape).float(),
+        height.expand(shape).float() * spatial_stride + (spatial_stride - 1) / 2,
+        width.expand(shape).float() * spatial_stride + (spatial_stride - 1) / 2,
     ), dim=-1).reshape(batch, -1, 3)
     return TokenLayout(
         valid=valid[:, :, None].expand(shape).reshape(batch, -1),

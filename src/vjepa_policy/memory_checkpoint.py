@@ -45,6 +45,7 @@ def load_full_history_checkpoint(checkpoint_path, encoder_checkpoint, *, device=
         corrected_rope_frequency_pairing=saved["corrected_predictor_rope"],
         activation_checkpointing_blocks=0,
         attention_backend=attention_backend,
+        history_spatial_pool=contract.history_pool_size,
     )
     semantics = checkpoint["memory_training"]["model_semantics"]
     model = build_full_history_policy(

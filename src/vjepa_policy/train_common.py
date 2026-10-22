@@ -165,8 +165,8 @@ def add_common_args(p):
                    help="Recreate the iterator every N optimizer steps to reclaim torchcodec worker "
                         "memory (0 only recycles at epoch boundaries).")
     p.add_argument("--resume", default=None,
-                   help="Resume from a {predictor, action_expert, step} checkpoint: reloads weights, "
-                        "jumps global_step forward, and fast-forwards the LR schedule.")
+                   help="Resume full optimizer/RNG/data state from resume_state.pt; weight exports "
+                        "restore weights/progress and fast-forward the LR schedule only.")
     p.add_argument(
         "--predictor-init",
         default=None,
@@ -189,6 +189,13 @@ def add_common_args(p):
     p.add_argument("--loss-exp", type=float, default=1.0)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=1000)
+    p.add_argument("--save-training-state", action="store_true",
+                   help="Atomically save resume_state.pt with AdamW, schedule, rank RNG and data cursor.")
+    p.add_argument("--keep-last-checkpoints", type=int, default=0,
+                   help="Keep this many recent weight exports (0 keeps all), plus milestone steps.")
+    p.add_argument("--checkpoint-milestones", type=int, nargs="*", default=[])
+    p.add_argument("--stop-after-step", type=int,
+                   help="Save and exit at this absolute optimizer step, preserving the full --max-steps schedule.")
     p.add_argument("--save-initial-checkpoint", action="store_true",
                    help="Save step-zero weights for a matched untrained baseline.")
     p.add_argument("--wandb-project", default="vjepa_policy")
@@ -465,11 +472,15 @@ def run_training(args, model, dataset, collator):
             "max_steps": args.max_steps,
             "stop_at": args.stop_at,
             "stop_file": args.stop_file,
+            "stop_after_step": getattr(args, "stop_after_step", None),
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "max_grad_norm": args.max_grad_norm,
             "mixed_precision": args.mixed_precision,
             "log_every": args.log_every,
             "save_every": args.save_every,
+            "save_training_state": getattr(args, "save_training_state", False),
+            "keep_last_checkpoints": getattr(args, "keep_last_checkpoints", 0),
+            "checkpoint_milestones": getattr(args, "checkpoint_milestones", []),
             "wandb_project": args.wandb_project,
             "wandb_name": args.wandb_name,
             "prefetch_factor": args.prefetch_factor,
