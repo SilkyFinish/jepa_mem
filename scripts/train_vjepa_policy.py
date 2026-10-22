@@ -404,6 +404,8 @@ def main(
             latent_grid=(layout.grid_depth, layout.grid_height, layout.grid_width),
             canonical_spatial_grid=encoder_spec.canonical_spatial_grid,
         )
+    if full_history:
+        predictor_kwargs["attention_backend"] = args.history_attention_backend
     predictor = predictor_builder(**predictor_kwargs)
     policy_kwargs = dict(
         action_dim=args.action_dim,
@@ -531,12 +533,9 @@ def main(
     if full_history:
         if getattr(dataset, "batch_schema", None) != policy_caps.batch_schema:
             raise ValueError("History policy requires the history dataset/collator contract")
-        validate_reference_capacity(dataset, args.batch_size)
+        if args.history_attention_backend == "dense":
+            validate_reference_capacity(dataset, args.batch_size)
         model.training_data_provenance = dataset.provenance
-    normalizer = getattr(dataset, "normalizer", None)
-    convention = getattr(normalizer, "metadata", {}).get("gripper_action_convention")
-    if convention is not None:
-        model.policy_serving["config"]["gripper_action_convention"] = convention
     run_training(args, model, dataset, collator)
 
 

@@ -408,7 +408,7 @@ class VJEPAGR1Serving:
         config,
         device="cuda",
     ):
-        from vjepa_policy.policy_serving.libero import VJEPAPolicyServing
+        from vjepa_policy.policy_serving.base import VJEPAPolicyServing
 
         self.core = VJEPAPolicyServing(
             ckpt_path=ckpt_path,

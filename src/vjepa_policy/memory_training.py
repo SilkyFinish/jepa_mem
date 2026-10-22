@@ -15,6 +15,8 @@ def add_history_args(parser):
     parser.add_argument("--history-bucket-size", type=int, default=128,
                         help="Sort shuffled pools by prefix length; 0 disables bucketing")
     parser.add_argument("--history-encoder-batch-size", type=int, default=4)
+    parser.add_argument("--history-attention-backend", choices=("segmented", "dense"), default="segmented",
+                        help="Exact query-block SDPA, or bounded dense correctness reference")
     return parser
 
 

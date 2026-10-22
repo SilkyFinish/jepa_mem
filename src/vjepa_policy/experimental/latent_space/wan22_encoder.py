@@ -1,4 +1,4 @@
-"""Frozen Wan2.2 VAE38 latent encoder for the LIBERO latent-space ablation."""
+"""Frozen Wan2.2 VAE38 latent encoder for latent-space experiments."""
 
 from __future__ import annotations
 

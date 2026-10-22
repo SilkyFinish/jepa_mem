@@ -4,14 +4,34 @@ import torch
 
 from .action_expert import ActionExpert
 from .memory_types import validate_decision_step
+from .memory_attention import validity_attention_plan
+
+
+class _HistoryFutureLayers:
+    """Assemble H/F only for the current action layer, retaining autograd.
+
+    Eagerly concatenating all layers holds a second full history copy alive
+    while action attention saves its own [H,F,A] tensors for backward.
+    """
+
+    def __init__(self, history, future):
+        self.history, self.future = history, future
+
+    def __len__(self):
+        return len(self.history)
+
+    def __getitem__(self, index):
+        h, f = self.history[index], self.future[index]
+        return torch.cat((h.key, f.key), dim=2), torch.cat((h.value, f.value), dim=2)
 
 
 class MemoryActionExpert(ActionExpert):
-    def __init__(self, *, rope_options, action_reads_future=True, **kwargs):
+    def __init__(self, *, rope_options, action_reads_future=True, attention_backend="segmented", **kwargs):
         super().__init__(**kwargs)
         self.rope_options = dict(rope_options)
         self.action_reads_future = bool(action_reads_future)
         self.read_full_predictor_kv = True
+        self.attention_backend = attention_backend
 
     def _memory_context(self, history, future, action_layout):
         validate_decision_step(future.decision_step, action_layout)
@@ -20,7 +40,7 @@ class MemoryActionExpert(ActionExpert):
         )
         if self.action_reads_future:
             context_valid = torch.cat((legal_history, future.layout.valid), dim=1)
-            layers = tuple(
+            layers = _HistoryFutureLayers(history.layers, future.layers) if self.attention_backend == "segmented" else tuple(
                 (torch.cat((h.key, f.key), dim=2), torch.cat((h.value, f.value), dim=2))
                 for h, f in zip(history.layers, future.layers)
             )
@@ -30,6 +50,9 @@ class MemoryActionExpert(ActionExpert):
         return layers, dict(
             context_valid=context_valid, action_valid=action_layout.valid,
             action_position_coords=action_layout.rope_coords, rope_options=self.rope_options,
+            memory_attention_plan=validity_attention_plan(
+                action_layout.valid, torch.cat((context_valid, action_layout.valid), dim=1),
+            ) if self.attention_backend == "segmented" else None,
         )
 
     def forward_memory(self, history, future, actions, language, language_mask, state,

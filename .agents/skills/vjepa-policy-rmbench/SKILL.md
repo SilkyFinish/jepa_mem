@@ -9,7 +9,7 @@ Read [the native example](../../../examples/rmbench/README.md), and use the trai
 
 Use a separate pinned RMBench simulator environment. Preserve its XPolicyLab and CuRobo revisions, asset provenance, CUDA extension build configuration, and any author-machine path corrections. Keep artifacts in the user's selected storage location.
 
-The native v1.0 HDF5 already shifts actions one saved frame ahead of state. Do not shift labels again. Use the official RGB codec and exactly the three head/left-wrist/right-wrist views; do not reuse LIBERO's image rotation. The native 14D absolute joint output has grippers at 6 and 13, with 0=closed/1=open. Do not route it through LIBERO's seven-dimensional clipping/sign conversion.
+The native v1.0 HDF5 already shifts actions one saved frame ahead of state. Do not shift labels again. Use the official RGB codec and exactly the three head/left-wrist/right-wrist views; preserve native image orientation. The native 14D absolute joint output has grippers at 6 and 13, with 0=closed/1=open. Preserve all fourteen native joint commands.
 
 Retain the original short-context architecture for the raw baseline. Call the random predictor/action-expert variant From Scratch, with the visual/text encoders still pretrained and frozen. Preserve the whole-task instruction; simulator target-pad identity and stage/subtask labels are not policy observations.
 

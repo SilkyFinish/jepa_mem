@@ -20,7 +20,7 @@ python examples/gr1/serve_policy.py \
   --host 127.0.0.1 --port 5555
 ```
 
-This CLI uses explicit GR-1 defaults; it does not expose the same optional metadata-driven flags as the LIBERO server. Match all settings to the training run, especially encoder identity, text length, chunk size, and normalization.
+This CLI uses explicit GR-1 defaults; it does not expose the same optional metadata-driven flags as the native RMBench server. Match all settings to the training run, especially encoder identity, text length, chunk size, and normalization.
 
 ## Evaluation
 

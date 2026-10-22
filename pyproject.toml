@@ -34,9 +34,6 @@ dependencies = [
 
 [project.optional-dependencies]
 serving = ["openpi-client>=0.1.0", "tyro>=0.9", "websockets>=14"]
-# The simulator is kept optional because training and model inspection do not
-# need a local LIBERO installation.
-libero = ["robosuite==1.4.1", "mujoco==3.2.3", "bddl", "glfw", "imageio[ffmpeg]", "termcolor"]
 
 [project.scripts]
 vjepa-precompute-text = "vjepa_policy.text_embeddings:main"

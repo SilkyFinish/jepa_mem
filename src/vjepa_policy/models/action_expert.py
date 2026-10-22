@@ -69,7 +69,7 @@ class PredictorKVActionAttention(nn.Module):
 
     def forward(self, action_hidden, context_key, context_value, *,
                 context_valid=None, action_valid=None, action_position_coords=None,
-                rope_options=None):
+                rope_options=None, memory_attention_plan=None):
         memory = any(item is not None for item in (
             context_valid, action_valid, action_position_coords, rope_options
         ))
@@ -90,7 +90,9 @@ class PredictorKVActionAttention(nn.Module):
             action_key = apply_3d_rope(action_key, action_position_coords, **rope_options)
         key = torch.cat((context_key, action_key), dim=2)
         value = torch.cat((context_value, action_value), dim=2)
-        if memory:
+        if memory and memory_attention_plan is not None:
+            output = memory_attention_plan.attend(query, key, value)
+        elif memory:
             allowed = action_valid[:, None, :, None] & torch.cat(
                 (context_valid, action_valid), dim=1
             )[:, None, None, :]
@@ -236,11 +238,13 @@ class ActionExpertBlock(nn.Module):
         action_valid=None,
         action_position_coords=None,
         rope_options=None,
+        memory_attention_plan=None,
     ):
         normed, attention_gate = self.pre_attn_norm(x, t_cond)
         x = x + self.attn(
             normed, ctx_k, ctx_v, context_valid=context_valid, action_valid=action_valid,
             action_position_coords=action_position_coords, rope_options=rope_options,
+            memory_attention_plan=memory_attention_plan,
         ) * attention_gate
         x = x + self.condition_attention(
             self.condition_norm(x), condition_tokens, condition_valid
@@ -342,6 +346,7 @@ class _ActionExpertBase(nn.Module):
         action_valid=None,
         action_position_coords=None,
         rope_options=None,
+        memory_attention_plan=None,
     ):
         if len(predictor_kv) != self.num_layers:
             raise ValueError(
@@ -363,6 +368,7 @@ class _ActionExpertBase(nn.Module):
                 context_valid=context_valid,
                 action_valid=action_valid,
                 action_position_coords=action_position_coords,
+                memory_attention_plan=memory_attention_plan,
                 rope_options=rope_options,
             )
         hidden, _ = self.final_norm(hidden, t_cond)

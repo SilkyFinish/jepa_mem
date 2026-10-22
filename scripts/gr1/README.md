@@ -18,7 +18,7 @@ dataset_stats_absolute_minmax_ck16.json
 text_embeddings/                         # remarks, T5 length 48 by default
 ```
 
-The policy selects the 29D order `left_arm, right_arm, left_hand, right_hand, waist`. State conditioning is `concat(sin(state), cos(state))`, giving 58D, without normalization. Targets are absolute 29D actions, normalized to `[-1, 1]` using exact min/max values and clipping. LIBERO statistics and packed state do not apply to this recipe.
+The policy selects the 29D order `left_arm, right_arm, left_hand, right_hand, waist`. State conditioning is `concat(sin(state), cos(state))`, giving 58D, without normalization. Targets are absolute 29D actions, normalized to `[-1, 1]` using exact min/max values and clipping.
 
 The local template and `train.sh` share `configs/recipes/gr1.env`: 50,000 updates and global batch 256 (4 GPUs × batch 64 × accumulation 1). Existing environment values take precedence. Preserve the intended batch when changing GPU count. The shell script accepts only the encoder name; it does not forward arbitrary training flags. Use the Python entry point for custom training options.
 

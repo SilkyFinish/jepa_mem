@@ -25,7 +25,7 @@ from vjepa_policy.policy_serving.gr1 import (
     VJEPAGR1Serving,
     validate_gr1_wire_observation,
 )
-from vjepa_policy.policy_serving.libero import PolicyServingConfig
+from vjepa_policy.policy_serving.base import PolicyServingConfig
 
 
 def gr1_modality_config(

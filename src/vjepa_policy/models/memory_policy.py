@@ -258,6 +258,7 @@ def build_full_history_policy(encoder, predictor, *, config=None, action_hidden_
         hidden_size=action_hidden_size, lang_dim=predictor.lang_dim,
         condition_num_heads=condition_num_heads, num_inference_steps=action_num_inference_steps,
         rope_options=rope_options, action_reads_future=config.action_reads_future,
+        attention_backend=predictor.attention_backend,
     )
     return FullHistoryVJEPAPolicy(
         encoder, predictor, action_expert, config=config, strict_v0_inputs=True, **kwargs,

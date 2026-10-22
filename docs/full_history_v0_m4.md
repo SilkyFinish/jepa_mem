@@ -174,6 +174,6 @@ CUDA_VISIBLE_DEVICES="$EVAL_GPU" "$POLICY_PYTHON" scripts/check_memory_online.py
 4. BF16 真实权重服务与网络请求验证；已有 CPU BF16 历史算子测试不能替代这一项。
 5. 实际模拟器闭环 rollout；当前只有原生记录 RGB 的在线服务请求，没有本版本闭环成功率。
 
-81 块完整历史、长序列 attention、正式模型容量/性能和 current/window/full 对照属于后续 M5。M4 仍使用密集 mask 参考后端，mask 上限为 16,777,216 个元素；即使提高 `max-history-blocks`，其他容量检查仍可能拒绝。不会自动切换到滑动窗口，也不能通过移除旧 KV 来获得干净的 window 消融。
+M4 阶段使用密集 mask 参考后端，mask 上限为 16,777,216 个元素。后续已接入 [完整历史分块 attention](full_history_attention.md)，当前默认 `segmented`，保留 `dense` 短序列参照。服务的默认五块容量、KV 字节预算和请求限制仍需显式配置；优化 attention 不会自动放宽服务资源限制。current/window/full 对照和完整闭环评测仍需单独执行。不会自动切换到滑动窗口，也不能通过移除旧 KV 来获得干净的 window 消融。
 
 M3 中 world 分支尚未充分拟合的诊断问题也仍存在。缓存一致性证明两种执行方式在已测条件下输出接近，不证明记忆能力、长历史收益或任务成功率。

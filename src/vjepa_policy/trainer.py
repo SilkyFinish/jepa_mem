@@ -152,7 +152,15 @@ class Trainer:
             mixed_precision=cfg["mixed_precision"],
             # Predictor keeps all pretrained mask tokens but forward uses only
             # mask_index=1; the others get no gradient, so DDP must allow it.
-            kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
+            kwargs_handlers=[
+                DistributedDataParallelKwargs(
+                    find_unused_parameters=True,
+                    # Share gradients with the communication buckets instead of
+                    # keeping a second model-sized copy on each device. Our loop
+                    # uses zero_grad(set_to_none=True), never in-place detach_.
+                    gradient_as_bucket_view=True,
+                )
+            ],
         )
 
         # ---- OOM fix: torchcodec's video decode leaks ~0.4 MB per decoded clip

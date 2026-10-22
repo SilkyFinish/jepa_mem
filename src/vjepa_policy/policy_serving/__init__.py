@@ -16,7 +16,7 @@ from vjepa_policy.policy_serving.gr1 import (
 
 def __getattr__(name):
     if name in {"PolicyServingConfig", "VJEPAPolicyServing"}:
-        from vjepa_policy.policy_serving.libero import (
+        from vjepa_policy.policy_serving.base import (
             PolicyServingConfig,
             VJEPAPolicyServing,
         )

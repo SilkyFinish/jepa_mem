@@ -30,6 +30,6 @@ python -c 'from vjepa_policy.encoders import encoder_names; print("\n".join(enco
 
 The registry includes V-JEPA 2/2.1 ViT-L, DINO, and WAN variants. Treat the actual registry as the list of IDs; historical ViT-G family/model combinations are not necessarily registry IDs. Implement `EncoderSpec` and a factory, then register it with `register_encoder(name, spec, factory)` in an imported module.
 
-`EncoderSpec` describes input geometry, latent grid, temporal stride, and feature width. These drive predictor projections and masks. Keep physical encoder input geometry distinct from the predictor's logical grid. LIBERO serving uses the same registry through `examples/libero/serve_policy.py`; there is no separate alternate-latent server entry point in this checkout.
+`EncoderSpec` describes input geometry, latent grid, temporal stride, and feature width. These drive predictor projections and masks. Keep physical encoder input geometry distinct from the predictor's logical grid. The shared loader uses the same registry through `policy_serving/base.py`.
 
 New checkpoints serialize `model_topology` and `policy_serving` metadata. Validate that training and serving agree on camera order, resize mode, frame layout, normalization, state packing, and RoPE settings before comparing encoders.

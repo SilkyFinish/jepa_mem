@@ -28,7 +28,7 @@ from vjepa_policy.policy_arch import (
     require_checkpoint_arch, load_policy_weights, memory_checkpoint_metadata,
     capabilities, HISTORY_CAPABILITIES,
 )
-from vjepa_policy.policy_serving.libero import PolicyServingConfig
+from vjepa_policy.policy_serving.base import PolicyServingConfig
 from vjepa_policy.trainer import Trainer, _EpochRandomSampler
 from test_memory_v0_model import model as tiny_model, batch as tiny_batch
 

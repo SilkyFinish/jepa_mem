@@ -1,4 +1,4 @@
-"""LIBERO inference adapter for the published V-JEPA policy."""
+"""Shared checkpoint loading and short-context policy inference."""
 
 import hashlib
 import logging
@@ -9,7 +9,6 @@ from dataclasses import dataclass, fields, replace
 import numpy as np
 import torch
 
-from vjepa_policy.policy_serving.actions import resolve_gripper_convention, to_env_action
 from vjepa_policy.data import CausalPatchMask
 from vjepa_policy.policy_serving.observations import (
     camera_observation, instruction, state_observation, to_uint8_hwc,
@@ -136,7 +135,6 @@ class PolicyServingConfig:
     view_layout: str = "independent"
     camera_keys: tuple[str, ...] | None = None
     dataset_stats: str | None = None
-    gripper_action_convention: str | None = None
 
     @classmethod
     def from_checkpoint(cls, ckpt_path, overrides=None):
@@ -503,7 +501,6 @@ class VJEPAPolicyServing:
             torch.backends.cudnn.allow_tf32 = False
         self.crop_size = args.crop_size
         self.t5_len = args.t5_len
-        self.binarize_gripper = True
         if args.view_layout not in ("quadrant", "horizontal", "independent"):
             raise ValueError(f"unsupported serving view_layout={args.view_layout!r}")
         self.view_layout = args.view_layout
@@ -1033,10 +1030,6 @@ class VJEPAPolicyServing:
                 f"action normalization stats not found: {stats_path}"
             )
         self.action_normalizer = ActionStateNormalizer.load(stats_path)
-        self.gripper_action_convention = resolve_gripper_convention(
-            args.gripper_action_convention, self.action_normalizer.metadata
-        )
-        logger.info("[action] gripper_action_convention=%s", self.gripper_action_convention)
 
     def _load_language(self, task_text):
         if task_text in self._lang_cache:
@@ -1127,10 +1120,7 @@ class VJEPAPolicyServing:
         actions = self.action_normalizer.unnormalize_action(actions.float().cpu())
         return [
             {
-                "actions": to_env_action(
-                    action.numpy(), binarize_gripper=self.binarize_gripper,
-                    gripper_action_convention=self.gripper_action_convention
-                )
+                "actions": action.numpy()
             }
             for action in actions
         ]

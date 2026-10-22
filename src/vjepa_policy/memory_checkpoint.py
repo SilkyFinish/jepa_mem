@@ -10,7 +10,7 @@ from vjepa_policy.models.memory_predictor import MemoryWorldModelPredictor
 from vjepa_policy.policy_arch import require_checkpoint_arch, load_policy_weights
 
 
-def load_full_history_checkpoint(checkpoint_path, encoder_checkpoint, *, device="cpu"):
+def load_full_history_checkpoint(checkpoint_path, encoder_checkpoint, *, device="cpu", attention_backend="segmented"):
     """Restore normalized-action inference from checkpoint metadata and frozen weights.
 
     Input normalization still uses the saved dataset_stats.json. This loader
@@ -44,6 +44,7 @@ def load_full_history_checkpoint(checkpoint_path, encoder_checkpoint, *, device=
         canonical_spatial_grid=encoder.spec.canonical_spatial_grid,
         corrected_rope_frequency_pairing=saved["corrected_predictor_rope"],
         activation_checkpointing_blocks=0,
+        attention_backend=attention_backend,
     )
     semantics = checkpoint["memory_training"]["model_semantics"]
     model = build_full_history_policy(

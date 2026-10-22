@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from vjepa_policy.datasets.rmbench import CAMERAS, decode_joint_actions
 from vjepa_policy.models.vjepa_policy import encode_video_views
-from vjepa_policy.policy_serving.libero import PolicyServingConfig, VJEPAPolicyServing
+from vjepa_policy.policy_serving.base import PolicyServingConfig, VJEPAPolicyServing
 from vjepa_policy.state import prepare_proprio_state
 
 class RMBenchPolicyServing(VJEPAPolicyServing):

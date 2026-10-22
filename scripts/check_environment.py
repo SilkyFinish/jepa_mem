@@ -5,7 +5,6 @@ import importlib.metadata as metadata
 import json
 import platform
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -13,10 +12,6 @@ PROFILES = {
     "source": (),
     "policy": ("vjepa_policy", "torch", "torchvision", "transformers", "sentencepiece",
                "accelerate", "lerobot", "openpi-client", "websockets"),
-    "libero": ("libero", "torch", "numpy", "robosuite", "mujoco", "bddl",
-               "openpi-client", "tyro", "imageio", "termcolor"),
-    "libero-plus": ("libero", "torch", "numpy", "robosuite", "mujoco", "bddl",
-                    "openpi-client", "tyro", "imageio", "termcolor", "Wand", "scikit-image"),
     "gr1": ("torch", "gymnasium", "gr00t"),
 }
 
@@ -31,21 +26,6 @@ def inspect_environment(profile, require_cuda=False):
             report["packages"][package] = metadata.version(package)
         except metadata.PackageNotFoundError:
             report["errors"].append(f"Missing distribution: {package}")
-    if profile == "libero-plus":
-        # Read exact pins from the install recipe instead of maintaining a second list.
-        recipe = Path(__file__).resolve().parents[1] / "examples/libero_plus/requirements.txt"
-        for line in recipe.read_text().splitlines():
-            match = re.fullmatch(r"([\w.-]+)==([\d.]+)", line.strip())
-            if match is None:
-                continue
-            package, required = match.groups()
-            try:
-                installed = metadata.version(package)
-                report["packages"][package] = installed
-                if installed.split("+", 1)[0] != required:
-                    report["errors"].append(f"{package}=={required} required by the Plus recipe; found {installed}")
-            except metadata.PackageNotFoundError:
-                report["errors"].append(f"Missing pinned distribution: {package}")
     if profile != "source":
         checked = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
         report["pip_check"] = (checked.stdout + checked.stderr).strip()

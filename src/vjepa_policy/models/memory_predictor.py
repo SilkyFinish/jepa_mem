@@ -4,12 +4,25 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from .memory_masks import history_attention_mask, future_attention_mask
+from .memory_attention import history_attention_plan, future_attention_plan
 from .memory_types import HistoryEncoding, FutureEncoding, LayerKV, concatenate_layouts
 from .wm_predictor import WorldModelPredictor
 
 
 class MemoryWorldModelPredictor(WorldModelPredictor):
     """Reuse Predictor weights while replacing the bidirectional H/F dataflow."""
+
+    def __init__(self, *args, attention_backend="segmented", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attention_backend = attention_backend
+
+    def _history_attention(self, query, key=None):
+        builder = history_attention_plan if self.attention_backend == "segmented" else history_attention_mask
+        return builder(query, key)
+
+    def _future_attention(self, history, future, decision_step):
+        builder = future_attention_plan if self.attention_backend == "segmented" else future_attention_mask
+        return builder(history, future, decision_step)
 
     @property
     def tokens_per_history_block(self):
@@ -78,7 +91,7 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         tokens = self.predictor_embed(clean_latents).flatten(1, 2)
         tokens = self._memory_view_embeddings(tokens, layout)
         condition, condition_valid = self._history_condition(clean_state, language, language_mask)
-        mask = history_attention_mask(layout)
+        mask = self._history_attention(layout)
         layers = []
         for index, block in enumerate(self.predictor_blocks):
             args = (block, tokens, condition, condition_valid, layout, mask, blocks)
@@ -101,7 +114,7 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         layout = history_layout
         offset = 0 if prefix is None else prefix.layout.valid.shape[1] // patches
         key_layout = layout if prefix is None else concatenate_layouts(prefix.layout, layout)
-        mask = history_attention_mask(layout, key_layout)
+        mask = self._history_attention(layout, key_layout)
         tokens = self._memory_view_embeddings(
             self.predictor_embed(observed_latents).flatten(1, 2), layout,
         )
@@ -121,7 +134,7 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         condition, condition_valid = self._condition_tokens(language, language_mask, current_state)
         tokens = self.mask_tokens[mask_index % self.num_mask_tokens].expand(batch, queries, -1)
         tokens = self._memory_view_embeddings(tokens, future_layout)
-        mask = future_attention_mask(history.layout, future_layout, decision_step)
+        mask = self._future_attention(history.layout, future_layout, decision_step)
         layers = []
         for index, block in enumerate(self.predictor_blocks):
             kwargs = dict(

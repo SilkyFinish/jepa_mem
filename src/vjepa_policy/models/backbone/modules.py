@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from timm.models.layers import drop_path
 
 from vjepa_policy.models.memory_types import LayerKV
+from vjepa_policy.models.memory_attention import SegmentedAttention
 from .rope import (
     apply_3d_rope,
     apply_rope_axes,
@@ -434,7 +435,8 @@ class RoPEAttention(nn.Module):
         validate_position_coords(position_coords, batch, tokens, x.device)
         if self.is_causal:
             raise ValueError("memory attention requires an explicit block mask, not is_causal=True")
-        if attn_mask is None or attn_mask.dtype != torch.bool:
+        segmented = isinstance(attn_mask, SegmentedAttention)
+        if not segmented and (attn_mask is None or attn_mask.dtype != torch.bool):
             raise ValueError("memory attention requires a bool attn_mask (True = allowed)")
         qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -460,24 +462,27 @@ class RoPEAttention(nn.Module):
             # No mutation, detach, re-projection or second rotation of prefix.
             key = torch.cat((pk, k), dim=2)
             value = torch.cat((pv, v), dim=2)
-        expected = (batch, 1, tokens, key.shape[2])
-        if attn_mask.shape != expected or attn_mask.device != x.device:
-            raise ValueError(f"memory attn_mask must have shape {expected} on the query device")
-        row_valid = attn_mask.any(dim=-1, keepdim=True)
-        # All-masked padding rows must be safe even for backends whose softmax
-        # returns NaN. Temporarily allow one key, then remove its output/gradient.
-        safe_mask = attn_mask.clone()
-        safe_mask[..., :1] |= ~row_valid
         dropout = self.attn_drop.p if self.training else 0.0
-        if self.use_sdpa:
-            output = F.scaled_dot_product_attention(
-                q, key, value, attn_mask=safe_mask, dropout_p=dropout,
-                is_causal=False, scale=self.scale,
-            )
+        if segmented:
+            row_valid = attn_mask.row_valid
+            output = attn_mask.attend(q, key, value, dropout_p=dropout, scale=self.scale)
         else:
-            logits = (q @ key.transpose(-2, -1)) * self.scale
-            weights = logits.masked_fill(~safe_mask, float("-inf")).softmax(dim=-1)
-            output = F.dropout(weights, p=dropout, training=self.training) @ value
+            expected = (batch, 1, tokens, key.shape[2])
+            if attn_mask.shape != expected or attn_mask.device != x.device:
+                raise ValueError(f"memory attn_mask must have shape {expected} on the query device")
+            row_valid = attn_mask.any(dim=-1, keepdim=True)
+            # Make all-masked padding rows safe; remove output/gradient below.
+            safe_mask = attn_mask.clone()
+            safe_mask[..., :1] |= ~row_valid
+            if self.use_sdpa:
+                output = F.scaled_dot_product_attention(
+                    q, key, value, attn_mask=safe_mask, dropout_p=dropout,
+                    is_causal=False, scale=self.scale,
+                )
+            else:
+                logits = (q @ key.transpose(-2, -1)) * self.scale
+                weights = logits.masked_fill(~safe_mask, float("-inf")).softmax(dim=-1)
+                output = F.dropout(weights, p=dropout, training=self.training) @ value
         output = output.masked_fill(~row_valid, 0)
         output = output.transpose(1, 2).reshape(batch, tokens, channels)
         output = self.proj_drop(self.proj(output))
