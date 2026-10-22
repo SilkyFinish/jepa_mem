@@ -83,3 +83,7 @@ The existing RMBench launchers remain the legacy baseline. The explicit full_his
 The shared `serve_policy.py` now selects the legacy or full-history adapter from checkpoint metadata. Use `run_memory_client.py` for the v0 session protocol; keep `run_client.py` for the original baseline. The new client fixes history sampling at 4 control steps and replanning at 16, and defaults to a 32-step diagnostic. See [M4 implementation and status](../../docs/full_history_v0_m4.md) for the cache, protocol, limits, commands and evidence.
 
 M4 has passed short-prefix FP32 numerical and real WebSocket diagnostics on an earlier implementation state. The latest boundary fixes have not been retested, and remaining checks are deferred at the user's request. The new simulator client has not yet completed a real closed-loop evaluation. Raising the configured block limit does not remove the dense-mask limit; long-history capacity and performance remain later work.
+
+## Shared-storage A100 deployment
+
+For full-history training on an ephemeral eight-A100 node, follow [the deployment guide](../../docs/a1008_shared_training.md). Its independent host preparation and foreground node launcher preserve shared artifacts, recover complete optimizer state, and run 20 serial native-limit rollouts after successful training. `run_memory_client.py --max-steps 0` uses the simulator's native step limit; the default remains a 32-step diagnostic.

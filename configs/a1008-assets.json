@@ -1,0 +1,24 @@
+{
+  "dataset": {
+    "repo": "TianxingChen/RMBench",
+    "revision": "5d8ff21038fba32ea549e9eee8497aaba9aab5cf",
+    "filename": "data/put_back_block/demo_clean.zip",
+    "sha256": "4e214d22994fb1909a4b79d46c7f8583035a2afe3aaa698003c5eb431eeeebc0"
+  },
+  "encoder": {
+    "url": "https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt",
+    "filename": "vjepa2_1_vitl_dist_vitG_384.pt",
+    "sha256": "7ea9b7cb4a75d10644a8a8d42cff9e177b10dca8f02173f0eaf2b0bed82838c6"
+  },
+  "codec": {
+    "url": "https://raw.githubusercontent.com/RoboTwin-Platform/RMBench/7d1cdfc7661c273a7a5c5f6126e2d1a7f0a3f4b7/data/decode_image_bit.py",
+    "sha256": "f87099865adb549f0b87d9d908913b22d8b099813632009b3095efd5c0ee92fc"
+  },
+  "text": {
+    "repo": "google/t5-v1_1-xxl",
+    "revision": "3db67ab1af984cf10548a73467f0e5bca2aaaeb2",
+    "weights_sha256": "c8407a9ae21075667be98f84f4c93e8a7bfc772a352cd2e6998f5916f7181db8"
+  },
+  "episode_manifest_sha256": "614f1b2a473e6e07a1f77090c12e0259a33ffa63352c4032e9163f8bcf852bc6",
+  "expected": {"episodes": 50, "frames": 17562, "decisions": 1013, "max_history_blocks": 81}
+}

@@ -35,7 +35,7 @@ The recipe uses two camera views. `--max-views 4` sets view-embedding table capa
 
 ## Checkpoint resumption and other datasets
 
-`--predictor-init` imports only predictor weights; `--resume` reloads trainable weights and progress, then fast-forwards the learning-rate schedule; AdamW moments are not saved or restored. Pass these to a supported Python entry point or a wrapper that forwards arguments. `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
+`--predictor-init` imports only predictor weights. `--resume checkpoint_step*.pt` reloads trainable weights/progress and fast-forwards the schedule without AdamW moments. The policy training entry point also supports `--save-training-state`, writing atomic `resume_state.pt` with optimizer, scheduler, per-rank RNG and consumed data cursor; resume that file with identical data, world size, batch, seeds and schedule for full continuation. See [shared-storage A100 deployment](a1008_shared_training.md). Pass arguments through a supported Python entry point or wrapper; `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
 
 The generic entry points are `scripts/pretrain_predictor.py` for predictor-only pretraining and `scripts/train_vjepa_policy.py` for downstream joint training. See [Extension contracts](extensions.md) for `--dataset-factory`, camera order, tensor shapes, and encoder registration. For RoboCasa-GR1, use its [preparation/training guide](../scripts/gr1/README.md) and [evaluation example](../examples/gr1/README.md).
 

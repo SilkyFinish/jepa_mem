@@ -19,6 +19,8 @@ Use `configs/gr1_vjepa21.env` as the portable GR-1 template. Native RMBench prep
 
 The websocket transport uses `openpi-client` message serialization; the server itself is in this repository.
 
+For a persistent host sharing storage with an ephemeral eight-A100 node, use [the dedicated deployment guide](a1008_shared_training.md). It provides a separate conda environment, pinned official downloads, a foreground platform entry command, resumable training and serial native-limit RMBench evaluation.
+
 ## Checks
 
 Check the actual interpreter, package versions and CUDA availability independently for policy and simulator. Compare camera order, resize mode, state/action contract, encoder identity and cache length against checkpoint metadata. Require real action requests and simulator rollouts before reporting performance. Preserve failed renderer/planner diagnostics.

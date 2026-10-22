@@ -1,5 +1,7 @@
 # Full-History v0 M3：训练接入
 
+八卡共享存储分支后来增加了可选完整 AdamW/RNG/数据游标续训；见 [A100 部署指南](a1008_shared_training.md)。本文后面的权重恢复描述保留 M3 阶段和现有轻量推理 checkpoint 的语义。
+
 后续在线缓存实现及当前验收边界见 [M4 记录](full_history_v0_m4.md)；本文保留 M3 阶段当时的实现与实测结果。
 
 后续完整历史分块 SDPA 已接入，当前后端选择、容量测试和实测结果见 [attention 优化记录](full_history_attention.md)。本文后面的稠密容量限制描述 M3 阶段的参照实现。

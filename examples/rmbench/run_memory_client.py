@@ -1,4 +1,4 @@
-"""Full-history v0 RMBench client; default budget is a short M4 diagnostic."""
+"""Full-history RMBench client; use --max-steps 0 for native episode limits."""
 import argparse
 import json
 import logging
@@ -26,6 +26,7 @@ def evaluate(args):
     episodes, attempts, candidate = [], 0, args.seed_start
     env, transport, session = None, None, None
     complete, error = False, None
+    diagnostic = args.max_steps != 0 or args.controller != "native_qpos"
     try:
         transport = WebsocketClientPolicy(host=args.host, port=args.port)
         if transport.get_server_metadata().get("protocol") != "rmbench_memory_v0":
@@ -47,13 +48,17 @@ def evaluate(args):
                 with (output / "rejected_seeds.jsonl").open("a") as stream:
                     stream.write(json.dumps({"seed": seed, "reason": "expert_unsolved"}) + "\n")
             env, _, instruction = make_environment(root, seed, existing=env)
+            if args.instruction is not None:
+                instruction = args.instruction
+                env.set_instruction(instruction)
             session = MemorySessionClient(transport)
             collector = HistoryCollector()
             start, queries, episode_error = time.time(), 0, None
+            step_limit = min(env.step_lim, args.max_steps) if args.max_steps else env.step_lim
             try:
                 session.reset(f"put_back_block:{seed}:{trial}", instruction)
                 collect(collector, env)
-                while env.take_action_cnt < min(env.step_lim, args.max_steps) and not env.eval_success:
+                while env.take_action_cnt < step_limit and not env.eval_success:
                     session.append(collector)
                     actions = session.infer(int(env.take_action_cnt))
                     queries += 1
@@ -63,7 +68,7 @@ def evaluate(args):
                         else:
                             dense_joint_step(env, action, substeps=15)
                         collect(collector, env)
-                        if env.eval_success or env.take_action_cnt >= min(env.step_lim, args.max_steps):
+                        if env.eval_success or env.take_action_cnt >= step_limit:
                             break
             except Exception as exc:
                 episode_error = str(exc)
@@ -87,7 +92,7 @@ def evaluate(args):
                        "success": bool(env.eval_success), "steps": int(env.take_action_cnt),
                        "queries": queries, "seconds": time.time() - start,
                        "controller": args.controller, "error": episode_error or (str(cleanup_error) if cleanup_error else None),
-                       "diagnostic": True, "cache_revision": final_revision}
+                       "diagnostic": diagnostic, "step_limit": step_limit, "cache_revision": final_revision}
                 episodes.append(row)
                 with (output / "episodes.jsonl").open("a") as stream:
                     stream.write(json.dumps(row) + "\n")
@@ -112,7 +117,7 @@ def evaluate(args):
                 complete = False
                 error = error or str(exc)
                 logging.exception("Failed to close policy transport")
-        result = {"complete": complete, "diagnostic": True, "error": error,
+        result = {"complete": complete, "diagnostic": diagnostic, "error": error,
                   "episodes": len(episodes), "successes": sum(x["success"] for x in episodes),
                   "success_rate": sum(x["success"] for x in episodes)/len(episodes) if episodes else None,
                   "arguments": vars(args)}
@@ -128,11 +133,13 @@ def main(argv=None):
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--seed-start", type=int, default=100000)
     parser.add_argument("--max-seed-attempts", type=int, default=1000)
-    parser.add_argument("--max-steps", type=int, default=32)
+    parser.add_argument("--max-steps", type=int, default=32,
+                        help="0 uses the simulator's native episode limit; default is a 32-step diagnostic.")
     parser.add_argument("--controller", choices=("native_qpos", "dense15"), default="native_qpos")
+    parser.add_argument("--instruction", help="Fixed whole-task instruction from the training release (never stage/target labels)")
     args = parser.parse_args(argv)
-    if min(args.trials, args.max_steps, args.max_seed_attempts) <= 0:
-        parser.error("rollout budgets must be positive")
+    if min(args.trials, args.max_seed_attempts) <= 0 or args.max_steps < 0:
+        parser.error("trials/attempts must be positive and max-steps must be nonnegative")
     evaluate(args)
 
 

@@ -110,9 +110,15 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         Each new block reads the old prefix and earlier new blocks. Its own
         state is used at every layer, exactly as in forward_history.
         """
+        if self.training:
+            raise ValueError("append_history requires eval mode; training must recompute history")
         batch, blocks, patches, _ = observed_latents.shape
         layout = history_layout
         offset = 0 if prefix is None else prefix.layout.valid.shape[1] // patches
+        expected = torch.arange(offset, offset + blocks, device=layout.valid.device)
+        expected = expected.repeat_interleave(patches)[None].expand(batch, -1)
+        if not torch.equal(layout.block_id, expected):
+            raise ValueError("appended block IDs must continue the committed prefix")
         key_layout = layout if prefix is None else concatenate_layouts(prefix.layout, layout)
         mask = self._history_attention(layout, key_layout)
         tokens = self._memory_view_embeddings(

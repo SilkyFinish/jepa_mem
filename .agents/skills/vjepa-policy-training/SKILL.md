@@ -25,7 +25,7 @@ Copy the relevant `configs/*.env` template to an ignored `.local.env`, resolve a
 
 - DROID uses a 129-token memmap cache built by `scripts/cache_droid_t5.py`; RMBench uses 128-token prompt files built by `vjepa_policy.text_embeddings`. Its default is 128; pass other recipes' lengths explicitly.
 - The DROID reference shell launcher enforces eight GPUs. Use its Python entry point with Accelerate for another topology, not an ineffective environment override.
-- Predictor transfer needs an explicit path and compatible state dimensions. Only predictor weights transfer. `--resume` reloads policy weights/progress and advances the schedule; AdamW moments are not checkpointed.
+- Predictor transfer needs an explicit path and compatible state dimensions. Only predictor weights transfer. Weight exports restore weights/progress only. With `--save-training-state`, `resume_state.pt` additionally stores AdamW, scheduler, per-rank RNG and consumed data cursor; full resume requires identical data/world/batch/seeds/schedule. Do not describe a weight-only restart as exact optimizer continuation.
 - Global batch is GPUs × per-device batch × accumulation. Keep it fixed for a reproduction, or record the changed value for an experiment.
 - DDP shares gradient storage with communication buckets (`gradient_as_bucket_view=True`). Preserve the Trainer's `zero_grad(set_to_none=True)` behavior and avoid in-place `detach_()` on gradient views. Single-GPU capacity measurements do not include DDP bucket overhead; stress the longest history after the first optimizer update before estimating multi-GPU capacity. Record process-local allocator overrides alongside NCCL settings.
 - Templates and launchers share `configs/recipes/*.env`. Existing environment variables override defaults; source the local template for artifact paths. RMBench uses V-JEPA 2.1 ViT-L, packed state width 48, and text length 128.
@@ -34,6 +34,8 @@ Copy the relevant `configs/*.env` template to an ignored `.local.env`, resolve a
 Use a fresh output directory for a smoke run. Report whether cache construction, data loading, forward/backward, optimizer updates, and checkpoint saving were actually tested. Do not infer training success from imports or CLI help alone. For custom data/encoders follow [Extension contracts](../../../docs/extensions.md).
 
 Require successful launcher exit after checkpoint saving and record any NCCL transport overrides. A logged optimizer step alone does not establish distributed teardown.
+
+For ephemeral eight-A100 nodes mounting persistent shared storage, use [the deployment guide](../../../docs/a1008_shared_training.md) and `scripts/a1008/host_setup.sh` / `node.sh`. Keep the node entry process in the foreground; preserve platform GPU allocation. The formal plan is full50 / 100 epochs / global batch 16, with real NCCL, longest-history AdamW, rendering/replay and websocket rollout gates before training. Local RTX validation cannot certify the remote hardware or simulator. Completed training is required before serial native-limit evaluation.
 
 For the native RMBench ALOHA baseline, use the [RMBench skill](../vjepa-policy-rmbench/SKILL.md) and its separate 14D joint-action adapter.
 
