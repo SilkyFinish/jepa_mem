@@ -85,7 +85,7 @@ def parse_args(argv=None):
     add_history_args(parser)
     preliminary = parser.parse_args(argv)
     if preliminary.policy_arch == "full_history":
-        set_history_defaults(parser)
+        set_history_defaults(parser, preliminary.text_encoder)
     return parser.parse_args(argv)
 
 
@@ -276,7 +276,7 @@ def main(
     encoder_builder = encoder_builder or build_frozen_encoder
     dataset_collator_builder = dataset_collator_builder or build_dataset_collator
     if full_history:
-        validate_history_args(args)
+        history_config = validate_history_args(args)
         from vjepa_policy.models.memory_predictor import MemoryWorldModelPredictor
         from vjepa_policy.models.memory_policy import build_full_history_policy
         policy_builder = policy_builder or build_full_history_policy
@@ -427,7 +427,7 @@ def main(
     )
     if full_history:
         model = policy_builder(
-            encoder, predictor, action_hidden_size=args.action_hidden_size,
+            encoder, predictor, config=history_config, action_hidden_size=args.action_hidden_size,
             condition_num_heads=args.condition_num_heads,
             action_num_inference_steps=args.action_num_inference_steps,
             action_loss_weight=args.action_loss_weight,

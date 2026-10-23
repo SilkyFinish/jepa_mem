@@ -27,3 +27,4 @@ configs/*.local.env
 # Local project environments and benchmark assets
 .envs/
 third_party/
+/jepa_mem_assets/

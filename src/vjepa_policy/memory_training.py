@@ -6,6 +6,8 @@ HISTORY_FACTORY = "vjepa_policy.datasets.rmbench_history:build_dataset"
 
 def add_history_args(parser):
     parser.add_argument("--policy-arch", choices=("legacy", "full_history"), default="legacy")
+    parser.add_argument("--text-encoder", choices=("t5", "bert"), default="t5",
+                        help="Frozen text features; BERT selects the explicit v0_bert contract")
     parser.add_argument("--history-feature-cache", help="Frozen observation/target cache manifest")
     parser.add_argument("--history-episode-ids", nargs="+", help="Explicit diagnostic episode selection")
     parser.add_argument("--history-max-decision-step", type=int,
@@ -20,25 +22,26 @@ def add_history_args(parser):
     return parser
 
 
-def set_history_defaults(parser):
+def set_history_defaults(parser, text_encoder="t5"):
+    config = FullHistoryV0Config.for_text_encoder(text_encoder)
     parser.set_defaults(
         encoder="vjepa2_1_vitl", encoder_family="vjepa2_1", model_name="vit_large",
         encoder_checkpoint_key="ema_encoder", view_layout="independent",
         views=["observation.images." + camera for camera in FullHistoryV0Config().cameras],
-        dataset_factory=HISTORY_FACTORY, context_len=128, lang_dim=4096,
+        dataset_factory=HISTORY_FACTORY, context_len=config.text_length, lang_dim=config.text_dim,
         action_dim=14, proprio_dim=14, max_state_dim=48, proprio_encoding="identity",
         require_full_future_window=True, batch_size=1,
     )
 
 
 def validate_history_args(args):
-    config = FullHistoryV0Config()
+    config = FullHistoryV0Config.for_text_encoder(getattr(args, "text_encoder", "t5"))
     fixed = dict(
         encoder=config.encoder, encoder_family="vjepa2_1", model_name="vit_large",
         encoder_checkpoint_key="ema_encoder", crop_size=224, patch_size=16, tubelet_size=2,
         num_frames=33, past_frames=4, video_frame_stride=4, context_tubelets=1,
         view_layout="independent", action_dim=14, proprio_dim=14, max_state_dim=48,
-        proprio_encoding="identity", context_len=128, lang_dim=4096, action_chunk_size=32,
+        proprio_encoding="identity", context_len=config.text_length, lang_dim=config.text_dim, action_chunk_size=32,
         action_normalization="QUANTILE", state_normalization="QUANTILE",
         clip_normalized=False, require_full_future_window=True, instruction_field="task",
         loss_exp=1.0,
@@ -63,7 +66,9 @@ def validate_history_args(args):
 def validate_predictor_transfer(checkpoint, predictor):
     """Shapes alone cannot establish the source's state/rotary semantics."""
     from vjepa_policy.memory_config import contract_from_checkpoint_metadata
-    contract_from_checkpoint_metadata(checkpoint)
+    contract = contract_from_checkpoint_metadata(checkpoint)
+    if contract is not None and contract.text_dim != predictor.lang_dim:
+        raise ValueError("Predictor transfer text contract differs from the target model")
     topology = checkpoint.get("model_topology") or {}
     attention = predictor.predictor_blocks[0].self_attn
     required = {

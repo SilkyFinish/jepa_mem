@@ -7,10 +7,19 @@ if [[ ! -f "$JEPA_CONFIG" ]]; then
   exit 2
 fi
 source "$JEPA_CONFIG"
+for option in "${@:2}"; do
+  if [[ "$option" == --train-only ]]; then export JEPA_TRAIN_ONLY=1; fi
+done
 source "$JEPA_REPO/configs/full_history_a1008.env"
-if [[ ! -d "$JEPA_SHARED_ROOT" || ! -d "$RMBENCH_ROOT" ]]; then
-  echo 'Shared storage or existing RMBench checkout is not mounted.' >&2
+if [[ ! -d "$JEPA_SHARED_ROOT" ]]; then
+  echo 'Shared storage is not mounted.' >&2
   exit 2
+fi
+if [[ "$JEPA_TRAIN_ONLY" != 1 ]]; then
+  if [[ ! -d "$RMBENCH_ROOT" ]]; then
+    echo 'Existing RMBench checkout is not mounted.' >&2
+    exit 2
+  fi
 fi
 mkdir -p "$TMPDIR"
 export PYTHONPATH="$JEPA_REPO/src:$JEPA_REPO${PYTHONPATH:+:$PYTHONPATH}"

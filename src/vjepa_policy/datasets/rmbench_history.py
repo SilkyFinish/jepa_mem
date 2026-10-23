@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.text_cache import text_cache_filename
 from vjepa_policy.datasets import DEFAULT_PROMPT, VideoClipTransform
 from vjepa_policy.datasets.lerobot_video import TextEmbeddingCache
 from vjepa_policy.datasets.normalization import ActionStateNormalizer
@@ -23,14 +24,16 @@ class RMBenchHistoryDataset(Dataset):
     def __init__(self, manifest, args, include_action=True):
         if not include_action:
             raise ValueError("History v0 currently supports joint policy training")
-        self.config = FullHistoryV0Config()
+        self.config = FullHistoryV0Config.for_text_encoder(getattr(args, "text_encoder", "t5"))
         self.manifest_path = Path(manifest)
         self.manifest = json.loads(self.manifest_path.read_text())
         if self.manifest["action_contract"] != self.config.action_contract:
             raise ValueError("RMBench history requires native absolute 14D actions")
         self.codec_path = self.manifest["codec_path"]
         self.transform = VideoClipTransform((self.config.image_size,) * 2)
-        self.text_cache = TextEmbeddingCache(args.text_cache_dir, self.config.text_length)
+        self.text_cache = TextEmbeddingCache(
+            args.text_cache_dir, self.config.text_length, self.config.text_encoder,
+        )
         self.normalizer = ActionStateNormalizer.load(args.dataset_stats or self.manifest["statistics"])
         if (self.normalizer.action_mode, self.normalizer.state_mode, self.normalizer.clip_values) != (
                 "QUANTILE", "QUANTILE", False):
@@ -103,7 +106,7 @@ class RMBenchHistoryDataset(Dataset):
         text_files = {
             hashlib.sha256(prompt.encode()).hexdigest(): sha256_file(
                 Path(args.text_cache_dir) /
-                f"{hashlib.sha256(prompt.encode()).hexdigest()}.t5_len{self.config.text_length}.pt"
+                text_cache_filename(prompt, self.config.text_length, self.config.text_encoder)
             ) for prompt in prompts
         }
         return {
@@ -169,7 +172,10 @@ class RMBenchHistoryDataset(Dataset):
         state = self._numeric[episode_index]["observation.state"][list(ends)]
         language, mask = self.text_cache.load(DEFAULT_PROMPT.format(task=row["instruction"]))
         if language.shape != (config.text_length, config.text_dim):
-            raise ValueError("v0 requires cached T5 [128,4096]")
+            raise ValueError(
+                f"{config.model_version} requires cached {config.text_encoder} "
+                f"[{config.text_length},{config.text_dim}]"
+            )
         sample = {
             "batch_schema": config.batch_schema,
             "episode_id": row["episode_id"],

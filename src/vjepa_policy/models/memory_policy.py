@@ -89,7 +89,10 @@ class FullHistoryVJEPAPolicy(nn.Module):
         if language.ndim != 3 or language.shape[0] != batch_size or language.shape[-1] != self.predictor.lang_dim:
             raise ValueError("language must match Predictor [B,S,D_language]")
         if self.strict_v0_inputs and language.shape[1:] != (self.config.text_length, self.config.text_dim):
-            raise ValueError("production v0 requires [B,128,4096] language features")
+            raise ValueError(
+                f"production {self.config.model_version} requires "
+                f"[B,{self.config.text_length},{self.config.text_dim}] language features"
+            )
         if language_mask.shape != language.shape[:2] or language_mask.dtype != torch.bool:
             raise ValueError("language_mask must be bool [B,S]")
         for name, tensor in (("history_state", state[valid]), ("language", language[language_mask])):
@@ -242,7 +245,7 @@ def build_full_history_policy(encoder, predictor, *, config=None, action_hidden_
             predictor.tubelet_size, predictor.num_frames, predictor.num_views,
             predictor.grid_depth, predictor.grid_height, predictor.grid_width,
             predictor.lang_dim, predictor.proprio_dim) != (
-            224, 224, 16, 2, 10, 3, 5, 14, 14, 4096, 96):
+            224, 224, 16, 2, 10, 3, 5, 14, 14, config.text_dim, 96):
         raise ValueError("Production Full-History v0 requires the fixed M0 geometry")
     if (getattr(encoder, "_vjepa_policy_family", None) != "vjepa2_1"
             or getattr(encoder, "_vjepa_policy_model_name", None) != "vit_large"

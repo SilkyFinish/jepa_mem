@@ -52,7 +52,7 @@ def evaluate(args):
                 instruction = args.instruction
                 env.set_instruction(instruction)
             session = MemorySessionClient(transport)
-            collector = HistoryCollector()
+            collector = HistoryCollector(config=session.config)
             start, queries, episode_error = time.time(), 0, None
             step_limit = min(env.step_lim, args.max_steps) if args.max_steps else env.step_lim
             try:

@@ -1,6 +1,8 @@
-"""CPU host preparation: pinned official V1 archive, codec, encoder and T5 snapshot."""
+"""CPU host preparation: pinned official data, vision weights and frozen text encoder."""
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -9,7 +11,7 @@ import tempfile
 import time
 import zipfile
 
-from scripts.a1008.common import REPO, paths, run, sha256, write_json
+from scripts.a1008.common import asset_sources, paths, run, sha256, text_encoder, write_json
 
 
 def verified(path, expected):
@@ -70,18 +72,71 @@ def verify_prepared(p, lock):
     return actual
 
 
+def prepare_text_model(p, spec):
+    destination = p["text_model"]
+    if text_encoder() == "bert":
+        source = os.environ.get("JEPA_BERT_SOURCE")
+        destination.mkdir(parents=True, exist_ok=True)
+        for name, digest in spec["files"].items():
+            target = destination / name
+            if not target.exists():
+                if not source:
+                    raise ValueError("Set JEPA_BERT_SOURCE to the existing local bert-base-uncased directory")
+                original = verified(Path(source) / name, digest)
+                partial = target.with_suffix(target.suffix + ".partial")
+                shutil.copy2(original, partial)
+                verified(partial, digest).replace(target)
+            verified(target, digest)
+        return
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id=spec["repo"], revision=spec["revision"], local_dir=destination,
+                      allow_patterns=["config.json", "pytorch_model.bin", "spiece.model",
+                                      "special_tokens_map.json", "tokenizer_config.json"])
+    verified(destination / "pytorch_model.bin", spec["weights_sha256"])
+
+
+def verify_text_model(p, spec):
+    if text_encoder() == "bert":
+        for name, digest in spec["files"].items():
+            verified(p["text_model"] / name, digest)
+    else:
+        verified(p["text_model"] / "pytorch_model.bin", spec["weights_sha256"])
+
+
+def prepare_bert_cache(p, spec):
+    from vjepa_policy.text_embeddings import precompute_text_embeddings
+    marker = p["text"] / "provenance.json"
+    with (p["root"] / ".cache_build.lock").open("w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        if marker.exists():
+            cached = json.loads(marker.read_text())
+            if cached["source"] != spec or cached["context_length"] != 128 or not cached["files"]:
+                raise ValueError("BERT cache provenance mismatch")
+            for name, digest in cached["files"].items():
+                verified(p["text"] / name, digest)
+            return
+        precompute_text_embeddings([p["prepared"]], p["text"], str(p["text_model"]),
+                                   128, device="cpu", text_encoder="bert")
+        files = {f.name: sha256(f) for f in sorted(p["text"].glob("*.bert_len128.pt"))}
+        if not files:
+            raise ValueError("No BERT instruction embeddings were generated")
+        write_json(marker, dict(source=spec, context_length=128, files=files))
+
+
 def main():
-    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub import hf_hub_download
     p = paths()
-    lock = json.loads((REPO / "configs/a1008-assets.json").read_text())
-    marker = p["root"] / "assets_ready.json"
+    lock = asset_sources()
+    marker = p["ready"]
     if marker.exists():
         old = json.loads(marker.read_text())
         if old["sources"] != lock:
             raise ValueError("Asset lock changed; use a fresh JEPA_SHARED_ROOT")
         verify_prepared(p, lock)
         verified(p["encoder"], lock["encoder"]["sha256"])
-        verified(p["t5"] / "pytorch_model.bin", lock["text"]["weights_sha256"])
+        verify_text_model(p, lock["text"])
+        if text_encoder() == "bert":
+            prepare_bert_cache(p, lock["text"])
         print("[ready] pinned assets already prepared", flush=True)
         return
     if shutil.disk_usage(p["root"]).free < 120 * 1024**3:
@@ -93,10 +148,7 @@ def main():
     codec_root = p["root"] / "official_codec"
     download(lock["codec"]["url"], codec_root / "data/decode_image_bit.py", lock["codec"]["sha256"])
     download(lock["encoder"]["url"], p["encoder"], lock["encoder"]["sha256"])
-    snapshot_download(repo_id=lock["text"]["repo"], revision=lock["text"]["revision"],
-                      local_dir=p["t5"], allow_patterns=["config.json", "pytorch_model.bin", "spiece.model",
-                                                       "special_tokens_map.json", "tokenizer_config.json"])
-    verified(p["t5"] / "pytorch_model.bin", lock["text"]["weights_sha256"])
+    prepare_text_model(p, lock["text"])
     prepared_root = p["prepared"].parent
     if not (prepared_root / "summary.json").is_file():
         if prepared_root.exists():
@@ -104,8 +156,11 @@ def main():
         run([sys.executable, "examples/rmbench/prepare.py", "--source", p["data"],
              "--rmbench-root", codec_root, "--output", prepared_root])
     actual = verify_prepared(p, lock)
+    if text_encoder() == "bert":
+        prepare_bert_cache(p, lock["text"])
     write_json(marker, dict(sources=lock, actual=actual, prepared_at=time.time()))
-    print("[ready] CPU assets prepared; node.sh will build T5 and visual feature caches on one GPU", flush=True)
+    print(f"[ready] CPU assets prepared; text_encoder={text_encoder()}; "
+          "node.sh will build frozen text and visual feature caches", flush=True)
 
 
 if __name__ == "__main__":

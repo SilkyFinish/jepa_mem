@@ -15,7 +15,9 @@ fi
 "$POLICY_PYTHON" -m pip install -c configs/a1008-requirements.txt -e '.[serving]' h5py opencv-python-headless
 "$POLICY_PYTHON" -m pip check
 "$POLICY_PYTHON" -m pip freeze > "$JEPA_SHARED_ROOT/policy-environment.txt"
-# Transport-only overlay: leave the previously verified simulator environment intact.
-"$POLICY_PYTHON" -m pip --python "$RMBENCH_PYTHON" install --target "$JEPA_SHARED_ROOT/envs/sim_client" --upgrade --no-deps \
-  openpi-client==0.1.2 websockets==16.1.1 msgpack==1.1.2 typing-extensions==4.15.0
+# Transport-only overlay: unnecessary on train-only hosts; never edit the simulator environment.
+if [[ "$JEPA_TRAIN_ONLY" != 1 ]]; then
+  "$POLICY_PYTHON" -m pip --python "$RMBENCH_PYTHON" install --target "$JEPA_SHARED_ROOT/envs/sim_client" --upgrade --no-deps \
+    openpi-client==0.1.2 websockets==16.1.1 msgpack==1.1.2 typing-extensions==4.15.0
+fi
 "$POLICY_PYTHON" -m scripts.a1008.prepare_assets

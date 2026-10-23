@@ -28,6 +28,31 @@ class MemoryV0ContractTest(unittest.TestCase):
         self.assertEqual(module.contract_from_checkpoint_metadata(
             self.config.checkpoint_metadata()), self.config)
 
+    def test_bert_contract_is_explicit_and_preserves_nonlanguage_fields(self):
+        bert = FullHistoryV0Config.for_text_encoder("bert")
+        self.assertEqual((bert.model_version, bert.text_encoder, bert.text_dim), ("v0_bert", "bert", 768))
+        self.assertEqual(FullHistoryV0Config.from_dict(bert.to_dict()), bert)
+        self.assertEqual(module.contract_from_checkpoint_metadata(bert.checkpoint_metadata()), bert)
+        changed = {key for key, value in bert.to_dict().items() if value != self.config.to_dict()[key]}
+        self.assertEqual(changed, {"model_version", "text_dim"})
+        self.assertNotEqual(bert.fingerprint(), self.config.fingerprint())
+        self.assertEqual(FullHistoryV0Config.for_text_encoder("t5"), self.config)
+
+    def test_bert_width_and_version_cannot_be_selected_independently(self):
+        for changes in ({"text_dim": 768}, {"model_version": "v0_bert"},
+                        {"model_version": "v0_bert", "text_dim": 1024}):
+            with self.assertRaises(ValueError):
+                replace(self.config, **changes)
+        bert = FullHistoryV0Config.for_text_encoder("bert")
+        with self.assertRaises(ValueError):
+            replace(bert, history_interval_steps=8)
+        with self.assertRaises(ValueError):
+            FullHistoryV0Config.for_text_encoder("other")
+        metadata = bert.checkpoint_metadata()
+        metadata["model_version"] = "v0"
+        with self.assertRaises(ValueError):
+            module.contract_from_checkpoint_metadata(metadata)
+
     def test_native_geometry_and_state_validity_width(self):
         self.assertEqual(self.config.tokens_per_block, 588)
         self.assertEqual(self.config.future_tokens, 2352)

@@ -21,6 +21,8 @@ def load_full_history_checkpoint(checkpoint_path, encoder_checkpoint, *, device=
     saved = checkpoint.get("policy_serving", {}).get("config")
     if not isinstance(saved, dict):
         raise ValueError("Full-history checkpoint is missing reconstruction metadata")
+    if saved.get("lang_dim") != contract.text_dim or saved.get("t5_len") != contract.text_length:
+        raise ValueError("Checkpoint text reconstruction metadata differs from the memory contract")
     signature = encoder_signature(SimpleNamespace(
         checkpoint=encoder_checkpoint, encoder_checkpoint_key=saved["encoder_checkpoint_key"],
         encoder_interpolate_rope=saved["encoder_interpolate_rope"],

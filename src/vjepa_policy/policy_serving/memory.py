@@ -21,6 +21,7 @@ from vjepa_policy.models.memory_layouts import visual_layout
 from vjepa_policy.models.memory_masks import DEFAULT_MAX_MASK_ELEMENTS
 from vjepa_policy.models.vjepa_policy import encode_video_views
 from vjepa_policy.state import pack_normalized_state
+from vjepa_policy.text_cache import text_cache_filename
 
 PROTOCOL = "rmbench_memory_v0"
 
@@ -114,7 +115,9 @@ class MemoryPolicyServing:
 
         def text_loader(instruction):
             prompt_digest = hashlib.sha256(DEFAULT_PROMPT.format(task=instruction).encode()).hexdigest()
-            path = text_root / f"{prompt_digest}.t5_len{model.config.text_length}.pt"
+            path = text_root / text_cache_filename(
+                DEFAULT_PROMPT.format(task=instruction), model.config.text_length, model.config.text_encoder,
+            )
             if sha256_file(path) != provenance.get("text_cache_sha256", {}).get(prompt_digest):
                 raise ValueError("instruction/text cache differs from checkpoint provenance")
             payload = torch.load(path, map_location="cpu", weights_only=True)
@@ -124,7 +127,7 @@ class MemoryPolicyServing:
 
     @property
     def metadata(self):
-        return {"policy_arch": "full_history", "model_version": "v0", "protocol": PROTOCOL,
+        return {"policy_arch": "full_history", "model_version": self.config.model_version, "protocol": PROTOCOL,
                 "action_dim": 14, "action_contract": self.config.action_contract,
                 "cache_backend": self.backend, "memory_schema": self.config.to_dict(),
                 "max_history_blocks": self.max_history_blocks}
@@ -231,8 +234,11 @@ class MemoryPolicyServing:
                 or mask.shape != language.shape[:2] or mask.dtype != torch.bool or not mask.any()
                 or not torch.isfinite(language).all()):
             raise ValueError("invalid text cache tensors")
-        if self.model.strict_v0_inputs and language.shape[1:] != (128, 4096):
-            raise ValueError("v0 requires 128x4096 text features")
+        if self.model.strict_v0_inputs and language.shape[1:] != (self.config.text_length, self.config.text_dim):
+            raise ValueError(
+                f"{self.config.model_version} requires "
+                f"{self.config.text_length}x{self.config.text_dim} text features"
+            )
         language = language.masked_fill(~mask[..., None], 0).detach().to(self.device)
         mask = mask.detach().to(self.device)
         predictor = self.model.predictor
@@ -317,8 +323,9 @@ class MemoryPolicyServing:
         p = self.model.predictor
         total_tokens = (len(cache.records) + len(new)) * p.tokens_per_history_block
         query_tokens = total_tokens if replace else len(new) * p.tokens_per_history_block
-        if max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS:
-            raise HistoryCacheError("history_capacity_exceeded", "dense reference mask budget exceeded; M5 backend required")
+        if (p.attention_backend == "dense"
+                and max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS):
+            raise HistoryCacheError("history_capacity_exceeded", "dense reference mask budget exceeded; use segmented attention")
         encoded = [self._encode_block(block) for block, _ in new]
         records = tuple(HistoryBlock(block["block_id"], block["end_step"], digest, item[1])
                         for (block, digest), item in zip(new, encoded))

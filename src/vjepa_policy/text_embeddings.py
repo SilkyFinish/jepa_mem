@@ -1,13 +1,13 @@
-"""Precompute T5 instruction embeddings consumed by the policy dataset."""
+"""Precompute frozen T5 or BERT token embeddings consumed by the policy dataset."""
 
 import argparse
-import hashlib
 from pathlib import Path
 
 import torch
 from tqdm import tqdm
 
 from vjepa_policy.datasets import DEFAULT_PROMPT, read_instructions
+from vjepa_policy.text_cache import text_cache_filename
 
 
 def read_prompts(dataset_dirs, instruction_field="task"):
@@ -25,18 +25,31 @@ def precompute_text_embeddings(
     context_length,
     device="cuda",
     instruction_field="task",
+    text_encoder="t5",
 ):
-    encode_prompts(read_prompts(dataset_dirs, instruction_field), cache_dir, model_name, context_length, device)
+    encode_prompts(read_prompts(dataset_dirs, instruction_field), cache_dir, model_name,
+                   context_length, device, text_encoder)
 
 
-def encode_prompts(prompts, cache_dir, model_name, context_length, device="cuda"):
-    """Encode complete prompts with the same payload and hashing as training."""
-    from transformers import AutoTokenizer, T5EncoderModel
+def encode_prompts(prompts, cache_dir, model_name, context_length, device="cuda", text_encoder="t5"):
+    """Encode complete prompts without pooling or updating the frozen encoder."""
+    from transformers import AutoModel, AutoTokenizer, T5EncoderModel
 
+    if text_encoder not in ("t5", "bert"):
+        raise ValueError(f"Unsupported text encoder: {text_encoder}")
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
-    encoder = T5EncoderModel.from_pretrained(model_name).to(device).eval()
+    local = Path(model_name).is_dir()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, local_files_only=local)
+    model_class = T5EncoderModel if text_encoder == "t5" else AutoModel
+    model_options = {"local_files_only": local}
+    if text_encoder == "bert":
+        model_options["add_pooling_layer"] = False
+    encoder = model_class.from_pretrained(model_name, **model_options).to(device).eval()
+    encoder.requires_grad_(False)
+    if text_encoder == "bert" and (encoder.config.model_type != "bert" or encoder.config.hidden_size != 768):
+        raise ValueError("BERT full-history features require bert-base with hidden_size=768")
+    embedding_dim = encoder.config.d_model if text_encoder == "t5" else encoder.config.hidden_size
 
     for prompt in tqdm(
         prompts,
@@ -54,12 +67,11 @@ def encode_prompts(prompts, cache_dir, model_name, context_length, device="cuda"
                 f"Prompt requires {prompt_length} tokens but context_length="
                 f"{context_length}; increase --context-length to avoid truncation: {prompt!r}"
             )
-        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        output_path = cache_dir / f"{digest}.t5_len{context_length}.pt"
+        output_path = cache_dir / text_cache_filename(prompt, context_length, text_encoder)
         if output_path.is_file():
             cached = torch.load(output_path, map_location="cpu", weights_only=True)
             context, mask = cached["context"], cached["mask"]
-            if (context.shape != (context_length, encoder.config.d_model)
+            if (context.shape != (context_length, embedding_dim)
                     or mask.shape != (context_length,) or not torch.isfinite(context).all()
                     or mask.sum().item() != prompt_length):
                 raise ValueError(f"Invalid existing text cache entry: {output_path}")
@@ -89,6 +101,7 @@ def main(argv=None):
     parser.add_argument("--dataset-dirs", nargs="+", required=True)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--model-name", default="google/t5-v1_1-xxl")
+    parser.add_argument("--text-encoder", choices=("t5", "bert"), default="t5")
     parser.add_argument("--context-length", type=int, default=128)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--instruction-field", choices=("task", "remarks"), default="task")
@@ -100,6 +113,7 @@ def main(argv=None):
         args.context_length,
         args.device,
         args.instruction_field,
+        args.text_encoder,
     )
 
 

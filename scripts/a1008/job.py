@@ -11,7 +11,10 @@ import sys
 import time
 import urllib.request
 
-from scripts.a1008.common import REPO, base_args, paths, schedule, serving_capacity, sha256, write_json
+from scripts.a1008.common import (
+    REPO, asset_sources, base_args, paths, per_device_batch, schedule, serving_capacity, sha256,
+    text_encoder, train_only, write_json,
+)
 
 
 def one_gpu_env():
@@ -29,7 +32,7 @@ class Job:
             raise ValueError("JEPA_RUN_NAME must be one directory name")
         self.root = self.p["root"] / "runs" / name
         self.world = int(os.environ.get("JEPA_GPUS", "8"))
-        self.plan = schedule(1013, self.world, int(os.environ.get("JEPA_EPOCHS", "100")))
+        self.plan = schedule(1013, self.world, int(os.environ.get("JEPA_EPOCHS", "100")), per_device_batch())
         self.children = []
         self.stopping = False
         self.phase = "starting"
@@ -37,7 +40,8 @@ class Job:
     def status(self, phase, **extra):
         self.phase = phase
         write_json(self.root / "status.json", dict(phase=phase, updated_at=time.time(),
-                   hostname=socket.gethostname(), pid=os.getpid(), plan=self.plan, **extra))
+                   hostname=socket.gethostname(), pid=os.getpid(), plan=self.plan,
+                   train_only=self.args.train_only, **extra))
         print(f"[stage] {phase}", flush=True)
 
     def stop(self, signum, frame):
@@ -107,8 +111,8 @@ class Job:
         from scripts.a1008.prepare_assets import verify_prepared
         from scripts.train_vjepa_policy import parse_args
         from vjepa_policy.datasets.rmbench_history import RMBenchHistoryDataset
-        lock = json.loads((REPO / "configs/a1008-assets.json").read_text())
-        ready = json.loads((self.p["root"] / "assets_ready.json").read_text())
+        lock = asset_sources()
+        ready = json.loads(self.p["ready"].read_text())
         if ready["sources"] != lock:
             raise ValueError("Run host_setup.sh with this branch's pinned assets first")
         verify_prepared(self.p, lock)
@@ -119,15 +123,16 @@ class Job:
             if not text_marker.exists():
                 self.command("text_cache", [sys.executable, "-m", "vjepa_policy.text_embeddings",
                     "--dataset-dirs", self.p["prepared"], "--cache-dir", self.p["text"],
-                    "--model-name", self.p["t5"], "--context-length", "128"], env=one_gpu_env())
+                    "--model-name", self.p["text_model"], "--text-encoder", text_encoder(),
+                    "--context-length", "128"], env=one_gpu_env())
                 write_json(text_marker, dict(source=lock["text"], context_length=128,
                     files={f.name: sha256(f) for f in sorted(self.p["text"].glob("*.pt"))}))
             text = json.loads(text_marker.read_text())
-            if text["source"] != lock["text"] or not text["files"]:
-                raise ValueError("T5 cache provenance mismatch")
+            if text["source"] != lock["text"] or text["context_length"] != 128 or not text["files"]:
+                raise ValueError("Text cache provenance mismatch")
             for name, digest in text["files"].items():
                 if sha256(self.p["text"] / name) != digest:
-                    raise ValueError("T5 cache hash mismatch")
+                    raise ValueError("Text cache hash mismatch")
             if not self.p["features"].exists():
                 if self.p["features"].parent.exists():
                     self.p["features"].parent.rename(self.p["root"] / f"history_features.incomplete.{time.time_ns()}")
@@ -139,7 +144,7 @@ class Job:
         try:
             if len(data) != 1013 or max(data.history_lengths) != 81 or data.selection["diagnostic_subset"]:
                 raise ValueError("Full50 history contract differs")
-            self.plan = schedule(len(data), self.world, self.plan["epochs"])
+            self.plan = schedule(len(data), self.world, self.plan["epochs"], self.plan["per_device_batch"])
             write_json(self.attempt / "dataset.json", dict(selection=data.selection, provenance=data.provenance))
         finally:
             data.close()
@@ -229,18 +234,22 @@ class Job:
                     stress = self.attempt / "longest_prefix"
                     self.command("longest_prefix", [*self.distributed(), "-m", "scripts.a1008.probe", "--mode", "stress",
                         *base_args(self.p), "--history-feature-cache", self.p["features"], "--output-dir", stress])
-                    self.status("simulator_preflight")
-                    self.command("simulator", [os.environ["RMBENCH_PYTHON"], "examples/rmbench/check_simulator.py",
-                        "--rmbench-root", os.environ["RMBENCH_ROOT"], "--dataset-root", self.p["data"],
-                        "--output", self.attempt / "simulator", "--seeds", "0", "100000",
-                        "--replay-episodes", "0", "--controllers", "dense15", "native_qpos"], env=self.sim_env())
-                    sim = json.loads((self.attempt / "simulator/results.json").read_text())
-                    if not sim["native_expert_passed"] or not any(r["mode"] == "recorded_action_replay"
-                            and r["controller"] == "dense15" and r["success"] for r in sim["records"]):
-                        raise ValueError("Native expert or recorded-action replay failed")
-                    self.evaluate(stress / "checkpoint_step000002.pt", self.attempt / "smoke_rollout", 1, True)
+                    if self.args.train_only:
+                        self.status("simulator_deferred", reason="Train-only: simulation checks and rollouts run on the host")
+                    else:
+                        self.status("simulator_preflight")
+                        self.command("simulator", [os.environ["RMBENCH_PYTHON"], "examples/rmbench/check_simulator.py",
+                            "--rmbench-root", os.environ["RMBENCH_ROOT"], "--dataset-root", self.p["data"],
+                            "--output", self.attempt / "simulator", "--seeds", "0", "100000",
+                            "--replay-episodes", "0", "--controllers", "dense15", "native_qpos"], env=self.sim_env())
+                        sim = json.loads((self.attempt / "simulator/results.json").read_text())
+                        if not sim["native_expert_passed"] or not any(r["mode"] == "recorded_action_replay"
+                                and r["controller"] == "dense15" and r["success"] for r in sim["records"]):
+                            raise ValueError("Native expert or recorded-action replay failed")
+                        self.evaluate(stress / "checkpoint_step000002.pt", self.attempt / "smoke_rollout", 1, True)
                     if self.args.preflight_only:
-                        self.status("preflight_passed", formal_training_started=False)
+                        self.status("preflight_passed", formal_training_started=False,
+                                    simulator_preflight="skipped" if self.args.train_only else "passed")
                         return
                     self.status("training")
                     command = [*self.distributed(), "scripts/train_vjepa_policy.py", *base_args(self.p),
@@ -267,6 +276,10 @@ class Job:
                     return
                 if result["step"] != self.plan["updates"]:
                     raise ValueError("Training ended at an unexpected update count")
+                if self.args.train_only:
+                    self.status("complete", checkpoint=str(train / result["checkpoint"]),
+                                evaluation="deferred_to_host", simulator_preflight="skipped")
+                    return
                 self.status("evaluating")
                 # Each attempt is fresh: interrupted/failed trials are never silently merged into a score.
                 evaluation = self.attempt / "rollouts"
@@ -287,11 +300,20 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--train-only", action="store_true", default=train_only(),
+                        help="Keep GPU diagnostics; defer all simulation checks and rollouts to the host")
     parser.add_argument("--allow-other-gpus", action="store_true", help="Explicit local diagnostic; record hardware")
     args = parser.parse_args()
+    if args.train_only and args.eval_only:
+        parser.error("--eval-only is incompatible with train-only mode; unset JEPA_TRAIN_ONLY for host evaluation")
     job = Job(args)
     if args.plan:
-        print(json.dumps(dict(plan=job.plan, output=str(job.root), paths={k: str(v) for k, v in job.p.items()}), indent=2))
+        print(json.dumps(dict(plan=job.plan, output=str(job.root), train_only=args.train_only,
+            evaluation="deferred_to_host" if args.train_only else "after_training",
+            language=dict(encoder=text_encoder(), context_length=128,
+                          hidden_size=768 if text_encoder() == "bert" else 4096,
+                          model_version="v0_bert" if text_encoder() == "bert" else "v0"),
+            paths={k: str(v) for k, v in job.p.items()}), indent=2))
     else:
         job.execute()
 

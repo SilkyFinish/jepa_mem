@@ -10,8 +10,8 @@ from vjepa_policy.memory_config import FullHistoryV0Config
 class HistoryCollector:
     """Retain one sampled frame plus unacknowledged complete observation blocks."""
 
-    def __init__(self):
-        self.config = FullHistoryV0Config()
+    def __init__(self, config=None):
+        self.config = config or FullHistoryV0Config()
         self.last_step = -1
         self.previous_images = None
         self.pending = []
@@ -61,8 +61,14 @@ class MemorySessionClient:
     starts a new session and requires replay from episode zero.
     """
 
-    def __init__(self, transport, session_id=None):
+    def __init__(self, transport, session_id=None, config=None):
         self.transport = transport
+        if config is None:
+            metadata = (transport.get_server_metadata() if hasattr(transport, "get_server_metadata")
+                        else getattr(transport, "metadata", None))
+            config = (FullHistoryV0Config.from_dict(metadata.get("memory_schema"))
+                      if metadata is not None else FullHistoryV0Config())
+        self.config = config
         self.session_id = session_id or uuid.uuid4().hex
         self.revision = 0
         self.last_block_id = -1
@@ -112,7 +118,7 @@ class MemorySessionClient:
     def reset(self, episode_id, instruction):
         self.episode_id = episode_id
         return self._send("reset", episode_id=episode_id, instruction=instruction,
-                          protocol="rmbench_memory_v0", sampling_config=FullHistoryV0Config().to_dict())
+                          protocol="rmbench_memory_v0", sampling_config=self.config.to_dict())
 
     def append(self, collector):
         if not collector.pending and self.pending_request is None:

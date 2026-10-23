@@ -119,7 +119,7 @@ CUDA_VISIBLE_DEVICES="$EVAL_GPU" "$RMBENCH_PYTHON" -m examples.rmbench.run_memor
   --controller native_qpos --output "$M4_ROLLOUT_OUTPUT"
 ```
 
-默认 32 步只需要在 t=0 和 t=16 发起决策，最多读取 5 块历史。若继续决策到 t=32，需要 9 块；当前容量及 mask 限制会拒绝。短流程结束不代表完整任务完成或获得正式成功率。
+默认 32 步只需要在 t=0 和 t=16 发起决策，最多读取 5 块历史。若继续决策到 t=32，需要 9 块，必须提高默认的历史块数和 K/V 预算。服务端只对 Predictor 的 `dense` attention 后端执行 dense-mask 元素上限检查；默认 `segmented` attention 不构建完整 dense mask，仍须满足历史块数和 K/V 分配/暂存预算。500 步原生评测按最多 126 块配置容量，不能截断历史来绕过限制。短流程结束不代表完整任务完成或获得正式成功率。
 
 以后恢复真实数据诊断时，可运行：
 

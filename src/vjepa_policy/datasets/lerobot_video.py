@@ -137,16 +137,17 @@ def _make_relative_action(
 
 
 class TextEmbeddingCache:
-    def __init__(self, cache_dir: str | os.PathLike[str], context_len: int) -> None:
+    def __init__(self, cache_dir: str | os.PathLike[str], context_len: int, text_encoder: str = "t5") -> None:
         self.cache_dir = Path(cache_dir)
         self.context_len = context_len
+        self.text_encoder = text_encoder
         self._memory: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
     def load(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
         if prompt in self._memory:
             return self._memory[prompt]
-        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        path = self.cache_dir / f"{digest}.t5_len{self.context_len}.pt"
+        from vjepa_policy.text_cache import text_cache_filename
+        path = self.cache_dir / text_cache_filename(prompt, self.context_len, self.text_encoder)
         if not path.is_file():
             raise FileNotFoundError(
                 f"Missing text embedding cache: {path}. Run "

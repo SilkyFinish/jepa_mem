@@ -31,6 +31,7 @@ def collective(output):
 def stress(argv):
     from scripts import train_vjepa_policy as entry
     from vjepa_policy.train_common import build_dataset_collator
+    from scripts.a1008.common import schedule
     world = int(os.environ["WORLD_SIZE"])
 
     class Longest:
@@ -49,13 +50,16 @@ def stress(argv):
         data, collator = build_dataset_collator(args, **kwargs)
         return Longest(data), collator
     builder.supports_local_layout = True
-    args = entry.parse_args([*argv, "--max-steps", "2", "--num-workers", "0",
-                             "--gradient-accumulation-steps", str(16 // world)])
+    args = entry.parse_args([*argv, "--max-steps", "2", "--num-workers", "0"])
+    plan = schedule(32, world, 1, args.batch_size)
+    args.gradient_accumulation_steps = plan["accumulation"]
     start = time.time()
     entry.main(args=args, dataset_collator_builder=builder)
     if int(os.environ["RANK"]) == 0:
         Path(args.output_dir, "stress.json").write_text(json.dumps(dict(
             ok=True, diagnostic=True, updates=2, seconds=time.time() - start,
+            world_size=world, per_device_batch=args.batch_size,
+            accumulation=args.gradient_accumulation_steps, global_batch=plan["global_batch"],
             peak_allocated_gib=torch.cuda.max_memory_allocated() / 2**30,
             peak_reserved_gib=torch.cuda.max_memory_reserved() / 2**30)) + "\n")
 

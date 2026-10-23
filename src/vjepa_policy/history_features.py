@@ -51,7 +51,7 @@ class FrozenHistoryFeatureCache:
         self.metadata = json.loads(self.path.read_text())
         metadata = self.metadata
         self.fingerprint = fingerprint(metadata)
-        config = FullHistoryV0Config()
+        self.config = config = dataset.config
         if metadata.get("format") != "rmbench_frozen_history_v0":
             raise ValueError("Unknown history feature cache format")
         if metadata.get("contract") != config.to_dict():
@@ -100,7 +100,7 @@ class FrozenHistoryFeatureCache:
         return value.float()
 
     def load(self, episode_id, decision, ends):
-        config = FullHistoryV0Config()
+        config = self.config
         row = self.metadata["episodes"][episode_id]
         history = torch.stack([
             self._tensor(row["observations"][str(end)], (config.tokens_per_block, 1024),

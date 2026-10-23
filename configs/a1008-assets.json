@@ -19,6 +19,19 @@
     "revision": "3db67ab1af984cf10548a73467f0e5bca2aaaeb2",
     "weights_sha256": "c8407a9ae21075667be98f84f4c93e8a7bfc772a352cd2e6998f5916f7181db8"
   },
+  "bert": {
+    "encoder_type": "bert",
+    "model": "bert-base-uncased",
+    "context_length": 128,
+    "hidden_size": 768,
+    "files": {
+      "config.json": "7160e1553ad2ca51d8c1cb066be533db31826e12d173824c1bb0cb1a4f187d20",
+      "model.safetensors": "68d45e234eb4a928074dfd868cead0219ab85354cc53d20e772753c6bb9169d3",
+      "tokenizer.json": "ce64fce797c24f68df90b40a3f74f579b336a493db14bd583fd520ea0d8c9a98",
+      "tokenizer_config.json": "a025160ef0431f1a392f6f050c1310f4c5d9fb6f275932dbccba73c4d214bf10",
+      "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  },
   "episode_manifest_sha256": "614f1b2a473e6e07a1f77090c12e0259a33ffa63352c4032e9163f8bcf852bc6",
   "expected": {"episodes": 50, "frames": 17562, "decisions": 1013, "max_history_blocks": 81}
 }

@@ -52,19 +52,34 @@ class FullHistoryV0Config:
     action_reads_future: bool = True
 
     def __post_init__(self):
-        # M0 freezes one recipe. A changed recipe needs an explicit contract
-        # revision rather than silently changing an existing v0 experiment.
+        if self.model_version not in ("v0", "v0_bert"):
+            raise ValueError(f"Unsupported Full-History model version: {self.model_version!r}")
+        language = {"model_version": self.model_version,
+                    "text_dim": 768 if self.model_version == "v0_bert" else 4096}
         for field in fields(self):
             value = getattr(self, field.name)
-            if type(value) is not type(field.default) or value != field.default:
+            expected = language.get(field.name, field.default)
+            if type(value) is not type(expected) or value != expected:
                 raise ValueError(
-                    f"Full-History v0 requires {field.name}={field.default!r}, got {value!r}"
+                    f"Full-History {self.model_version} requires {field.name}={expected!r}, got {value!r}"
                 )
             if isinstance(value, tuple) and any(
-                type(item) is not type(expected)
-                for item, expected in zip(value, field.default)
+                type(item) is not type(expected_item)
+                for item, expected_item in zip(value, field.default)
             ):
                 raise ValueError(f"Invalid element types in {field.name}")
+
+    @classmethod
+    def for_text_encoder(cls, text_encoder):
+        if text_encoder == "t5":
+            return cls()
+        if text_encoder == "bert":
+            return cls(model_version="v0_bert", text_dim=768)
+        raise ValueError(f"Unsupported text encoder: {text_encoder!r}")
+
+    @property
+    def text_encoder(self):
+        return "bert" if self.model_version == "v0_bert" else "t5"
 
     @property
     def tokens_per_block(self):
@@ -182,7 +197,7 @@ def contract_from_checkpoint_metadata(metadata):
         if "memory_schema" in metadata or "model_version" in metadata:
             raise ValueError("Legacy checkpoint contains incompatible memory version markers")
         return None
-    if arch != "full_history" or metadata.get("model_version") != "v0":
+    if arch != "full_history" or metadata.get("model_version") not in ("v0", "v0_bert"):
         raise ValueError("Unsupported policy architecture/model version")
     config = FullHistoryV0Config.from_dict(metadata.get("memory_schema"))
     if config.policy_arch != arch or config.model_version != metadata["model_version"]:

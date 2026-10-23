@@ -286,6 +286,47 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "history_capacity_exceeded")
         self.assertEqual(result["cache_revision"], 1)
 
+    def test_segmented_attention_ignores_dense_mask_budget(self):
+        self.model.predictor.attention_backend = "segmented"
+        for backend in ("incremental", "recompute"):
+            with self.subTest(backend=backend), patch(
+                    "vjepa_policy.policy_serving.memory.DEFAULT_MAX_MASK_ELEMENTS", 1):
+                self.service = self.make_service(backend=backend)
+                self.assertTrue(self.reset()["ok"])
+                self.assertTrue(self.append([block(0)])["ok"])
+                reply = self.append([block(i) for i in range(1, 5)], rid="bulk", revision=1)
+                self.assertTrue(reply["ok"], reply)
+                self.assertEqual((reply["cache_revision"], reply["last_block_id"]), (2, 4))
+                result = self.service.infer(self.infer_request(step=16, revision=2))
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["actions"].shape, (32, 14))
+                self.assertTrue(np.isfinite(result["actions"]).all())
+
+    def test_dense_attention_keeps_mask_budget_before_encoding(self):
+        self.model.predictor.attention_backend = "dense"
+        for backend in ("incremental", "recompute"):
+            with self.subTest(backend=backend), patch(
+                    "vjepa_policy.policy_serving.memory.DEFAULT_MAX_MASK_ELEMENTS", 1):
+                self.service = self.make_service(backend=backend)
+                self.reset()
+                with patch.object(self.service, "_encode_block") as encoder:
+                    reply = self.append([block(0)])
+                self.assertEqual(reply["error"]["code"], "history_capacity_exceeded")
+                self.assertIn("dense reference mask budget", reply["error"]["message"])
+                self.assertEqual(reply["cache_revision"], 0)
+                encoder.assert_not_called()
+
+    def test_segmented_attention_keeps_kv_budget_before_encoding(self):
+        self.model.predictor.attention_backend = "segmented"
+        self.service = self.make_service(max_cache_bytes=1)
+        self.reset()
+        with patch.object(self.service, "_encode_block") as encoder:
+            reply = self.append([block(0)])
+        self.assertEqual(reply["error"]["code"], "history_capacity_exceeded")
+        self.assertIn("KV allocation/staging budget", reply["error"]["message"])
+        self.assertEqual(reply["cache_revision"], 0)
+        encoder.assert_not_called()
+
     def test_backends_match_and_bulk_commit_only_once(self):
         policies = (self.service, self.make_service(backend="recompute"))
         responses = []
