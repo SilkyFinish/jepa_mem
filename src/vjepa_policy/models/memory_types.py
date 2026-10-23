@@ -26,6 +26,60 @@ class LayerKV:
             raise ValueError("KV must be floating point")
 
 
+    @property
+    def shape(self):
+        return self.key.shape
+
+    @property
+    def dtype(self):
+        return self.key.dtype
+
+    @property
+    def device(self):
+        return self.key.device
+
+
+class JoinedLayerKV(LayerKV):
+    """Differentiable KV pieces concatenated only inside a consuming layer.
+
+    Shared regular-history pieces can remain expanded views of one batch row.
+    Materialized keys/values are deliberately never cached on this object.
+    """
+
+    def __init__(self, parts):
+        parts = tuple(parts)
+        if not parts or any(not isinstance(part, LayerKV) for part in parts):
+            raise ValueError("Joined KV requires nonempty LayerKV pieces")
+        first = parts[0]
+        for part in parts[1:]:
+            if ((part.shape[0], part.shape[1], part.shape[3]) !=
+                    (first.shape[0], first.shape[1], first.shape[3])
+                    or part.dtype != first.dtype or part.device != first.device):
+                raise ValueError("Joined KV pieces must share batch/heads/width/dtype/device")
+        object.__setattr__(self, "parts", parts)
+
+    @property
+    def key(self):
+        return torch.cat([part.key for part in self.parts], dim=2)
+
+    @property
+    def value(self):
+        return torch.cat([part.value for part in self.parts], dim=2)
+
+    @property
+    def shape(self):
+        first = self.parts[0].shape
+        return (first[0], first[1], sum(part.shape[2] for part in self.parts), first[3])
+
+    @property
+    def dtype(self):
+        return self.parts[0].dtype
+
+    @property
+    def device(self):
+        return self.parts[0].device
+
+
 @dataclass(frozen=True)
 class TokenLayout:
     """One episode per batch row; never pack different episodes in a row.
@@ -78,9 +132,9 @@ def _validate_layers(layers, layout):
     for layer in layers:
         if not isinstance(layer, LayerKV):
             raise ValueError("layers must contain LayerKV")
-        if (layer.key.shape[0], layer.key.shape[2]) != layout.valid.shape:
+        if (layer.shape[0], layer.shape[2]) != layout.valid.shape:
             raise ValueError("KV batch/token dimensions must match the layout")
-        if layer.key.device != layout.valid.device:
+        if layer.device != layout.valid.device:
             raise ValueError("KV and layout must share a device")
 
 

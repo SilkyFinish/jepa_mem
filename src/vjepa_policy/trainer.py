@@ -104,7 +104,28 @@ class _EpochRandomSampler(Sampler):
         generator.manual_seed(self.seed + self.epoch)
         self._order = torch.randperm(len(self.data_source), generator=generator)
         lengths = getattr(self.data_source, "history_lengths", None)
-        if lengths is not None and self.bucket_size:
+        if getattr(self.data_source, "share_history_prefixes", False) and self.batch_size > 1:
+            # Every anchor appears exactly once. Random cyclic offsets change
+            # adjacent-anchor grouping each epoch; shuffle groups, not rows.
+            episodes = {}
+            for i, (episode, decision) in enumerate(self.data_source.index):
+                episodes.setdefault(episode, []).append(i)
+            batches, leftovers = [], []
+            for indices in episodes.values():
+                shift = int(torch.randint(len(indices), (1,), generator=generator))
+                indices = indices[shift:] + indices[:shift]
+                stop = len(indices) // self.batch_size * self.batch_size
+                batches.extend(indices[i:i+self.batch_size] for i in range(0,stop,self.batch_size))
+                leftovers.extend(indices[stop:])
+            if leftovers:
+                order = torch.randperm(len(leftovers), generator=generator).tolist()
+                leftovers = [leftovers[i] for i in order]
+                stop = len(leftovers) // self.batch_size * self.batch_size
+                batches.extend(leftovers[i:i+self.batch_size] for i in range(0,stop,self.batch_size))
+                leftovers = leftovers[stop:]
+            order = torch.randperm(len(batches), generator=generator).tolist()
+            self._order = torch.tensor([i for b in order for i in batches[b]] + leftovers, dtype=torch.long)
+        elif lengths is not None and self.bucket_size:
             # Random pools, locally sorted lengths, then shuffled whole batches.
             # One index per sample; worker recycling retains this same order.
             pool = max(self.batch_size, self.bucket_size // self.batch_size * self.batch_size)

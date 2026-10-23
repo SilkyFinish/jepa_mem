@@ -274,7 +274,13 @@ class MemoryPolicyServing:
                  for camera in self.config.cameras]
         video = torch.stack(clips).permute(0, 2, 1, 3, 4)[None].to(self.device)
         # One block per encoder call, matching the M3 reproducibility reference.
-        latent = encode_video_views(self.model.encoder, video)
+        if self.config.model_version == "v2":
+            # Frozen v2 training features are encoded in FP32, independently of
+            # Predictor/action autocast. Preserve that precision online too.
+            with torch.autocast(self.device.type, enabled=False):
+                latent = encode_video_views(self.model.encoder, video.float())
+        else:
+            latent = encode_video_views(self.model.encoder, video)
         state = torch.from_numpy(block["state"].copy())[None]
         state = self.normalizer({"observation.state": state})["observation.state"]
         state = pack_normalized_state(state, self.config.max_state_dim).to(self.device)
@@ -341,7 +347,7 @@ class MemoryPolicyServing:
         if _integer(request["expected_revision"], "expected_revision") != cache.revision:
             raise HistoryCacheError("revision_conflict", "infer expected_revision is stale")
         step = _integer(request["decision_step"], "decision_step")
-        if not cache.records or step != cache.records[-1].end_step or step % self.config.decision_interval_steps:
+        if not cache.records or step != cache.records[-1].end_step or step % getattr(self.config, "execution_interval_steps", self.config.decision_interval_steps):
             raise ValueError("infer must use the latest committed observation on the decision grid")
         noise_seed = int(content_digest([self.seed, sid, session.episode_id, request["request_id"], cache.revision])[:16], 16) % (2**63)
         generator = torch.Generator(device=self.device).manual_seed(noise_seed)

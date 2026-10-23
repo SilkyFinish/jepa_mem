@@ -1,5 +1,7 @@
 # Full-History v1 分阶段训练与串行评测
 
+2026-10-23 状态：旧的稀疏决策 v1 运行已按请求在第 6,468 次更新保存并停止，原始权重和完整恢复状态保留。新的 [密集采样训练协议](full_history_v2_dense.md) 沿用 v1 模型容量与空间池化，改为每帧训练起点；full50 的 25 epoch 为 27,425 次更新。下文的 200 epoch / 12,600 次更新描述旧实验，不应套用于新协议。新运行使用独立目录、完整学习率计划和源代码快照。
+
 `scripts/train_eval_stages.py --config /path/to/config.json` 使用同一组 GPU 串行运行训练阶段与 RMBench 评测。机器路径放在本地 JSON 或忽略的 `.local.env` 中。当前 put_back_block 计划为双 RTX 5090、v1 空间压缩、BF16、每卡 batch=2、梯度累积4次、全局 batch=16、完整 full50 数据和既有冻结特征缓存；200 epoch 共12,600次更新，在3,150/6,300/9,450/12,600步分别做20次rollout。没有按日期或时钟设置的训练截止点。
 
 每段训练均保持 `--num-epochs 200 --max-steps 12600`，由 `--stop-after-step` 在指定优化器更新边界保存并正常退出。`--save-training-state` 在 `resume_state.pt` 保存权重、AdamW moments、scheduler、每rank的Python/NumPy/PyTorch/CUDA随机状态和采样位置，下一段加载完整状态。不能用阶段长度修改总学习率计划，也不能以普通权重文件代替完整续训。训练发现非有限loss/梯度、分布式进程异常或检查点不匹配时停止并保留现场。

@@ -432,7 +432,9 @@ class RoPEAttention(nn.Module):
         batch, tokens, channels = x.shape
         if tokens == 0:
             raise ValueError("memory attention requires at least one current token")
-        validate_position_coords(position_coords, batch, tokens, x.device)
+        cached_rotary = hasattr(attn_mask, "rotate")
+        if not cached_rotary:
+            validate_position_coords(position_coords, batch, tokens, x.device)
         if self.is_causal:
             raise ValueError("memory attention requires an explicit block mask, not is_causal=True")
         segmented = isinstance(attn_mask, SegmentedAttention)
@@ -448,8 +450,11 @@ class RoPEAttention(nn.Module):
                 spatial_grid=(self.grid_size, self.grid_size) if H_patches is None else (H_patches, W_patches),
                 canonical_spatial_grid=self.canonical_spatial_grid,
             )
-        q = apply_3d_rope(q, position_coords, **rope_options)
-        k = apply_3d_rope(k, position_coords, **rope_options)
+        if cached_rotary:
+            q, k = attn_mask.rotate(q, k)
+        else:
+            q = apply_3d_rope(q, position_coords, **rope_options)
+            k = apply_3d_rope(k, position_coords, **rope_options)
         key, value = k, v
         if prefix_kv is not None:
             if not isinstance(prefix_kv, LayerKV):

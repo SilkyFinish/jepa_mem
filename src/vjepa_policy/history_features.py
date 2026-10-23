@@ -1,4 +1,5 @@
 """Versioned, frozen visual-feature cache; never stores trainable Predictor K/V."""
+from collections import OrderedDict
 import hashlib
 import json
 from pathlib import Path
@@ -22,7 +23,7 @@ def fingerprint(value):
 
 def encoding_code_signature():
     root = Path(__file__).parent
-    files = ["history_features.py", "models/memory_policy.py", "models/vjepa_policy.py",
+    files = ["history_features.py", "models/vjepa_policy.py",
              "datasets/transforms.py", "datasets/rmbench_history.py"]
     files += [str(p.relative_to(root)) for folder in ("encoders", "models/vjepa2_1", "models/backbone")
               for p in sorted((root / folder).rglob("*.py"))]
@@ -51,7 +52,7 @@ class FrozenHistoryFeatureCache:
         self.metadata = json.loads(self.path.read_text())
         metadata = self.metadata
         self.fingerprint = fingerprint(metadata)
-        config = FullHistoryV0Config()
+        self.config = config = dataset.config
         if metadata.get("format") != "rmbench_frozen_history_v0":
             raise ValueError("Unknown history feature cache format")
         if metadata.get("contract") != config.to_dict():
@@ -83,6 +84,7 @@ class FrozenHistoryFeatureCache:
             if str(decision) not in cached["targets"]:
                 raise ValueError(f"Missing future target {episode_id}:{decision}")
         self._checked = set()
+        self._observations = OrderedDict()
 
     def _tensor(self, entry, shape, frames):
         if entry["frame_indices"] != list(frames):
@@ -92,20 +94,28 @@ class FrozenHistoryFeatureCache:
             if sha256_file(path) != entry["sha256"]:
                 raise ValueError(f"Corrupt frozen feature: {path}")
             self._checked.add(path)
+        if shape[0] == self.config.tokens_per_block and path in self._observations:
+            self._observations.move_to_end(path)
+            return self._observations[path]
         value = torch.load(path, map_location="cpu", weights_only=True)
         dtype = getattr(torch, self.metadata["dtype"])
         if not torch.is_tensor(value) or value.shape != shape or value.dtype != dtype or not torch.isfinite(value).all():
             raise ValueError(f"Invalid frozen feature tensor: {path}")
         # Keep the existing Trainer's strict FP32 input contract; autocast is separate.
-        return value.float()
+        value = value.float()
+        if shape[0] == self.config.tokens_per_block:
+            self._observations[path] = value
+            if len(self._observations) > 512:
+                self._observations.popitem(last=False)
+        return value
 
     def load(self, episode_id, decision, ends):
-        config = FullHistoryV0Config()
+        config = self.config
         row = self.metadata["episodes"][episode_id]
         history = torch.stack([
             self._tensor(row["observations"][str(end)], (config.tokens_per_block, 1024),
                          config.observation_frames(end)) for end in ends
         ])
         target = self._tensor(row["targets"][str(decision)], (config.future_tokens, 1024),
-                              [max(0, decision + offset) for offset in config.target_offsets])
+                              [min(row["frames"] - 1, max(0, decision + offset)) for offset in config.target_offsets])
         return {"history_latents": history, "future_targets": target}

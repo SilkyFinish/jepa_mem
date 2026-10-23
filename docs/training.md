@@ -45,6 +45,10 @@ The Python entry points accept `--stop-at ISO8601_WITH_TIMEZONE` and `--stop-fil
 `--stop-after-step N` saves and exits at an absolute optimizer step while retaining the full `--max-steps` learning-rate schedule; `training_result.json` reports `stage_boundary`. It is an update boundary, not a wall-clock deadline. See [serial training and evaluation](full_history_staged_training.md) for checkpoint retention and continuation after rollout errors.
 
 
+## Full-History memory
+
+For every-frame training anchors, use `--history-model-version v2` and read [dense sampling and compute reuse](full_history_v2_dense.md). v2 retains the full dataset including masked action tails, keeps 16-step online replanning, and supports exact shared-prefix/FlexAttention computation without increasing trainable capacity.
+
 ## Full-History v0
 
 The optional `--history-model-version v1` adds per-view spatial compression of observed history before the Predictor; see [the v1 definition and diagnostics](full_history_v1_spatial.md). Omit this flag or pass `v0` to preserve the original full-resolution history. Both versions keep the same full temporal prefixes and future supervision. Saved model metadata determines the version during inference.

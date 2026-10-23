@@ -20,9 +20,13 @@ from vjepa_policy.trainer import Trainer
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument("--benchmark-stress-updates", type=int, default=0)
+    parser.add_argument("--benchmark-stress-mixed-episodes", action="store_true",
+                        help="Use the final stress update for longest-prefix mixed-episode fallback batches")
     options, rest = parser.parse_known_args(argv)
     if options.benchmark_stress_updates < 0:
         raise ValueError("stress update count must be nonnegative")
+    if options.benchmark_stress_mixed_episodes and options.benchmark_stress_updates < 2:
+        raise ValueError("Mixed-episode stress requires at least two stress updates")
     args = entry.parse_args(rest)
     if args.policy_arch != "full_history" or not args.history_feature_cache:
         raise ValueError("Timing requires full_history with a frozen feature cache")
@@ -45,7 +49,23 @@ def main(argv=None):
                 if options.benchmark_stress_updates > self.optimizer_steps_per_epoch:
                     raise ValueError("Stress updates must fit in the first epoch")
                 longest = max(range(len(self._dataset)), key=self._dataset.history_lengths.__getitem__)
-                self._epoch_sampler._order[:stress] = longest
+                episode, decision = self._dataset.index[longest]
+                adjacent = [i for i, (e, t) in enumerate(self._dataset.index) if e == episode and t <= decision]
+                adjacent = adjacent[-self.cfg["batch_size"]:]
+                window = [adjacent[i % len(adjacent)] for i in range(self.cfg["batch_size"])]
+                self._epoch_sampler._order[:stress] = torch.tensor(
+                    window * (stress // self.cfg["batch_size"]))
+                if options.benchmark_stress_mixed_episodes:
+                    longest_by_episode = {}
+                    for index, (episode, _) in enumerate(self._dataset.index):
+                        previous = longest_by_episode.get(episode)
+                        if previous is None or self._dataset.history_lengths[index] > self._dataset.history_lengths[previous]:
+                            longest_by_episode[episode] = index
+                    if len(longest_by_episode) < 2 or self.cfg["batch_size"] < 2:
+                        raise ValueError("Mixed-episode stress needs multiple episodes and per-device batch >= 2")
+                    indices = sorted(longest_by_episode.values(), key=self._dataset.history_lengths.__getitem__, reverse=True)
+                    self._epoch_sampler._order[stress-self.global_batch:stress] = torch.tensor(
+                        [indices[i % len(indices)] for i in range(self.global_batch)])
             self.report = dict(
                 diagnostic_only=True, status="running", rank=self.rank,
                 model_version=self.core.config.model_version, device=torch.cuda.get_device_name(),
@@ -58,13 +78,17 @@ def main(argv=None):
                 history_tokens_per_block=self.core.predictor.tokens_per_history_block,
                 future_tokens=self.core.predictor.future_tokens,
                 stress_updates=options.benchmark_stress_updates,
+                mixed_episode_stress=options.benchmark_stress_mixed_episodes,
+                shared_stress_layout="adjacent_decisions_at_longest_prefix",
                 dataset_history_lengths=self._dataset.history_lengths,
                 steps=self.steps, checkpoint_saves=self.saves,
             )
             def before(module, inputs):
                 b = inputs[0]
                 self.micro.append(dict(history_lengths=b["history_valid"].sum(1).tolist(),
-                                       padded_blocks=b["history_valid"].shape[1]))
+                                       padded_blocks=b["history_valid"].shape[1],
+                                       episode_ids=list(b["episode_id"]),
+                                       decision_steps=b["decision_step"].tolist()))
             def after(module, inputs, output):
                 loss = output[0].detach()
                 if not torch.isfinite(loss):
@@ -92,6 +116,8 @@ def main(argv=None):
                 step=self.global_step+1, seconds=now-self.last_time,
                 history_lengths=[n for b in current for n in b["history_lengths"]],
                 padded_blocks=[b["padded_blocks"] for b in current],
+                episode_ids=[b["episode_ids"] for b in current],
+                decision_steps=[b["decision_steps"] for b in current],
                 loss=sum(b["loss"] for b in current)/len(current),
                 peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
                 peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,

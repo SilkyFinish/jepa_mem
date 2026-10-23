@@ -146,10 +146,10 @@ class FullHistoryV0Config:
             "history_frame_indices": tuple(self.observation_frames(i) for i in ends),
             "history_state_indices": ends,
             "target_frame_indices": tuple(
-                max(0, decision_step + offset) for offset in self.target_offsets
+                min(episode_frames - 1, max(0, decision_step + offset)) for offset in self.target_offsets
             ),
             # The dataset has ALREADY shifted actions to next-state targets.
-            "action_indices": tuple(range(decision_step, decision_step + self.action_horizon)),
+            "action_indices": tuple(min(i, episode_frames - 1) for i in range(decision_step, decision_step + self.action_horizon)),
             "current_state_index": decision_step,
         }
 
@@ -179,11 +179,34 @@ class FullHistoryV1Config(FullHistoryV0Config):
     history_spatial_position: str = "original_patch_centers"
 
 
+@dataclass(frozen=True)
+class FullHistoryV2Config(FullHistoryV1Config):
+    """v1 architecture with dense training decisions and a current off-grid block."""
+
+    model_version: str = "v2"
+    schema_version: int = 2
+    decision_interval_steps: int = 1
+    execution_interval_steps: int = 16
+    history_endpoint_rule: str = "regular_grid_plus_current"
+    tail_policy: str = "clip_future_frames_mask_padded_actions"
+
+    def decision_steps(self, episode_frames):
+        _integer("episode_frames", episode_frames, minimum=1)
+        return tuple(range(episode_frames))
+
+    def observed_steps(self, end_step):
+        _integer("end_step", end_step)
+        regular = tuple(range(0, end_step + 1, self.history_interval_steps))
+        return regular if regular[-1] == end_step else (*regular, end_step)
+
+
 def full_history_config(version="v0"):
     if version == "v0":
         return FullHistoryV0Config()
     if version == "v1":
         return FullHistoryV1Config()
+    if version == "v2":
+        return FullHistoryV2Config()
     raise ValueError(f"Unsupported full-history model version: {version!r}")
 
 
@@ -205,7 +228,7 @@ def contract_from_checkpoint_metadata(metadata):
         if "memory_schema" in metadata or "model_version" in metadata:
             raise ValueError("Legacy checkpoint contains incompatible memory version markers")
         return None
-    if arch != "full_history" or metadata.get("model_version") not in ("v0", "v1"):
+    if arch != "full_history" or metadata.get("model_version") not in ("v0", "v1", "v2"):
         raise ValueError("Unsupported policy architecture/model version")
     cls = type(full_history_config(metadata["model_version"]))
     config = cls.from_dict(metadata.get("memory_schema"))

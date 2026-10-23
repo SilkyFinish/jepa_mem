@@ -1,0 +1,45 @@
+# Full-History v2: dense decisions and exact compute reuse
+
+v2 keeps the v1 model weights and 2×2 spatial history pooling, but trains at every recorded decision frame. The Predictor remains 24 layers / width 1024 and the Action Expert 24 layers / width 512 in the reference-capacity experiment: 602,120,590 trainable parameters, plus a frozen 304,680,960-parameter visual encoder. It is a new sampling contract, not a capacity reduction or a continuation of a v1 checkpoint.
+
+## Sampling and comparison
+
+Select `--policy-arch full_history --history-model-version v2`. Every frame of all selected demonstrations is an anchor, including episode tails. Future RGB indices clip to the final recorded frame; padded action labels are excluded from the loss. The temporal history contains every observation at steps 0, 4, 8, … up to the decision. An off-grid training decision adds its own current observation, without replacing an earlier observation. Only this current leaf is off-grid; it is not carried into another decision's history.
+
+For the local put_back_block full50 release, v2 contains 17,562 anchors, matching the raw short-context dataset, and up to 92 history blocks. Global batch 16 gives 1,097 complete optimizer updates / epoch and 17,552 consumed anchors / epoch; ten anchors in the incomplete accumulation window are omitted, with a new deterministic shuffle each epoch. Twenty-five epochs are 27,425 updates. A 24-hour training budget allows an average of 3.1504 seconds / update before saving and restart overhead; throughput must be measured on representative full50 data. Diagnostic episode selection is never a substitute for that measurement.
+
+Online observation collection remains every four control steps and action execution/replanning every sixteen steps. v2 metadata distinguishes training decision spacing from execution cadence. The client wire protocol remains `rmbench_memory_v0`; the server advertises the model's v2 memory schema. v2 visual encoding uses FP32 to match the frozen training cache, while the Predictor and Action Expert can use BF16.
+
+## Compute optimizations
+
+`--history-attention-backend flex` uses compiled FlexAttention for causal H attention with exactly the reference time/block/validity predicate. F and A use batched FlexAttention validity masks, avoiding per-row copies of legal KV spans. The segmented SDPA backend remains the correctness reference. CUDA kernel tiles are bounded to fit RTX 5090 shared memory. Attention compilation uses full graphs with a bounded 64-variant cache and explicit failure on cache exhaustion; falling back to eager Flex backward would materialize dense score matrices. Mask construction alone uses an explicit small-grid eager path when the temporary boolean mask is at most 64 KiB, avoiding a Torch 2.7 dynamic-reduction compiler bug; larger masks remain compiled, and attention forward/backward always remain compiled. Per-forward rotary factors are reused across Predictor and Action Expert layers, with fused Q/K rotation; these factors contain no weights or persistent episode state. Empty attention rows remain masked safely. The dense and segmented backends remain correctness references.
+
+`--history-shared-prefix` groups adjacent decisions from the same demonstration into a microbatch. Its regular causal history is computed once and remains differentiable. Joined KV containers retain shared views and materialize concatenated tensors only inside the consuming layer/checkpoint, avoiding one persistent full-history copy per sample; each off-grid current observation is processed as an independent leaf that sees only its own legal past. All decision targets and losses remain present. No trainable KV is detached or retained across optimizer updates. Batch grouping changes sample correlations, so this flag is recorded in training-data provenance and must match on resume. Leftover mixed-episode batches retain independent histories. Each sample's complete loss is checkpointed separately with non-reentrant recomputation, preserving all flow draws and the original sample-mean loss while bounding simultaneous activation memory. Simply running the independent B=4 path exceeded GPU 0 memory during a longest-history backward stress test.
+
+`--history-action-checkpointing` recomputes each action block and its temporary H/F/A KV concatenations during backward. Predictor checkpointing is still controlled by `--activation-checkpointing-blocks`. Removing language columns masked for every row avoids projecting padding into each historical block; valid condition tokens and state tokens are unchanged.
+
+For the intended two-GPU run, test per-device batch 4 and accumulation 2 (global batch 16), with 22 of the 24 Predictor layers checkpointed and action checkpointing enabled. All 24 layers remain in the model; this setting controls backward recomputation only. Twenty-four checkpointed layers are the more conservative capacity reference. The actual longest prefix must pass after AdamW state and DDP buckets exist. Include mixed-episode fallback batches in the capacity check (`--benchmark-stress-updates 3 --benchmark-stress-mixed-episodes`). The first two stress updates use adjacent decisions at the longest prefix, including their different visibility gaps; the third uses longest samples from different episodes after optimizer state exists.
+
+## Frozen cache construction
+
+The cache remains independent FP32 Encoder observations and separately normalized local future targets, never Predictor KV. Build into a fresh directory:
+
+```bash
+python -m scripts.cache_rmbench_history_features \
+  --history-model-version v2 \
+  --checkpoint /path/to/visual_encoder.pt \
+  --text-cache-dir /path/to/text_cache \
+  --dataset-dirs /path/to/prepared/full50 \
+  --cache-output /path/to/fresh/cache \
+  --encoder-batch-size 8 --decode-episode
+```
+
+Batching combines independent clips along the batch dimension; it does not join their temporal contexts. Whole-episode decoding transforms each RGB frame once and then slices clips. Cache metadata records batch size, FP32 compute, source hashes, code hashes and the versioned input contract. The reader validates hashes and uses a bounded per-worker observation LRU. Separate episode shards can be merged only when all encoding/source metadata agree and each expected episode and anchor appears exactly once. Preserve shard-relative feature paths and never claim a partial cache is complete.
+
+## Verification and launch
+
+Use `scripts/benchmark_history_training.py` with the real Trainer/DDP path. Keep initial compilation and explicit longest-history stress updates separate from representative throughput. Require finite parameters/gradients, frozen Encoder parameters, synchronized DDP samples, checkpoint export and successful launcher exit. Also verify strict v2 reconstruction, action requests, full-state resume and a real native simulator smoke rollout before formal training.
+
+Use fresh outputs and a source snapshot for the formal run. Preserve the stopped v1 experiment, weights and optimizer state. The new run starts From Scratch with a fixed full 25-epoch schedule. Exact throughput figures, GPU environment overrides, optimizer settings, source hashes and validation results belong with the run artifacts. Estimates do not establish convergence or task success.
+
+The 2026-10-23 checks passed 115 CPU tests, a two-GPU BF16 reduced-geometry restart comparison (seven continuous updates versus interruption after two and full-state continuation), and a full-capacity saved v2 checkpoint with real RGB, incremental/recompute parity through 81 history blocks and WebSocket requests. Restarted Predictor/Action Expert weights, AdamW moments, scheduler and per-rank sample sequences were exactly equal. A native 500-step simulator smoke also completed with 32 action queries and no process errors; its 0/1 result used a 16-update diagnostic checkpoint and is not formal performance evidence. The finalized mixed-episode, lazy joined-KV and compiled F/A path passed the repeated two-GPU continuation comparison with exactly equal weights, optimizer/scheduler state and sample sequences, including an epoch boundary and a mixed-episode batch. Full50 timing completed 128 updates with 24 checkpointed layers and 64 updates with 22, covering all 50 episodes and 1–92 history blocks. Final code also passed repeated full-capacity longest-prefix stress, finite gradient/parameter checks, DDP synchronization and full-state export. Run-specific timings and reports remain in the experiment artifacts. Frozen Encoder batching from four to eight produced small FP32 observation-feature differences in a real seven-tensor audit (maximum absolute difference about 3.72e-4, relative L2 below 8e-6); sampled future targets were identical. Batched encoding is not a bitwise-identity guarantee.

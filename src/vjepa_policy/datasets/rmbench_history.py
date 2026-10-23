@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.memory_config import FullHistoryV0Config, full_history_config
 from vjepa_policy.datasets import DEFAULT_PROMPT, VideoClipTransform
 from vjepa_policy.datasets.lerobot_video import TextEmbeddingCache
 from vjepa_policy.datasets.normalization import ActionStateNormalizer
@@ -23,7 +23,8 @@ class RMBenchHistoryDataset(Dataset):
     def __init__(self, manifest, args, include_action=True):
         if not include_action:
             raise ValueError("History v0 currently supports joint policy training")
-        self.config = FullHistoryV0Config()
+        version = getattr(args, "history_model_version", "v0")
+        self.config = full_history_config("v2" if version == "v2" else "v0")
         self.manifest_path = Path(manifest)
         self.manifest = json.loads(self.manifest_path.read_text())
         if self.manifest["action_contract"] != self.config.action_contract:
@@ -43,7 +44,7 @@ class RMBenchHistoryDataset(Dataset):
         requested = None if requested is None else set(map(str, requested))
         limit = getattr(args, "history_max_decision_step", None)
         if limit is not None and (limit < 0 or limit % self.config.decision_interval_steps):
-            raise ValueError("history-max-decision-step must be a nonnegative multiple of 16")
+            raise ValueError(f"history-max-decision-step must be a nonnegative multiple of {self.config.decision_interval_steps}")
         self.episodes, self.index, self._numeric = [], [], []
         self._handles = OrderedDict()
         found = set()
@@ -76,7 +77,7 @@ class RMBenchHistoryDataset(Dataset):
             raise ValueError(f"Unknown history episode ids: {sorted(requested - found)}")
         if not self.index:
             raise ValueError("No legal history decisions selected")
-        self.history_lengths = [t // self.config.history_interval_steps + 1 for _, t in self.index]
+        self.history_lengths = [len(self.config.observed_steps(t)) for _, t in self.index]
         capacity = getattr(args, "max_history_blocks", None)
         if capacity is not None and max(self.history_lengths) > capacity:
             raise ValueError("Selected complete prefixes exceed --max-history-blocks; no truncation is allowed")
@@ -182,15 +183,15 @@ class RMBenchHistoryDataset(Dataset):
             "language": language.float(),
             "language_mask": mask,
             "future_valid": torch.ones(config.future_tokens, dtype=torch.bool),
-            # No second action shift; all selected decisions have full targets.
-            "action": self._numeric[episode_index]["action"][decision:decision + config.action_horizon],
-            "action_is_pad": torch.zeros(config.action_horizon, dtype=torch.bool),
+            # No second action shift. v2 retains tails and masks padded actions.
+            "action": self._numeric[episode_index]["action"][(torch.arange(config.action_horizon) + decision).clamp(max=row["frames"] - 1)],
+            "action_is_pad": torch.arange(config.action_horizon) + decision >= row["frames"],
         }
         if self.feature_cache:
             sample.update(self.feature_cache.load(row["episode_id"], decision, ends))
         else:
             history_frames = [t for end in ends for t in config.observation_frames(end)]
-            target_frames = [max(0, decision + t) for t in config.target_offsets]
+            target_frames = [min(row["frames"] - 1, max(0, decision + t)) for t in config.target_offsets]
             decoded = self.decode_frames(episode_index, history_frames + target_frames)
             split = len(history_frames)
             sample["history_video"] = decoded[:, :, :split].reshape(

@@ -19,8 +19,10 @@ from vjepa_policy.models.vjepa_policy import encode_video_views
 
 @torch.no_grad()
 def build_cache(dataset, encoder, output_dir, *, encoder_metadata, storage_dtype=torch.float32,
-                device="cuda"):
+                device="cuda", batch_size=1, decode_episode=False):
     """Commit manifest only after every independent observation/target is complete."""
+    if batch_size < 1:
+        raise ValueError("cache batch_size must be positive")
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     if (output / "manifest.json").exists() or (output / "features").exists():
@@ -39,6 +41,7 @@ def build_cache(dataset, encoder, output_dir, *, encoder_metadata, storage_dtype
         "codec_sha256": sha256_file(dataset.codec_path),
         "dtype": str(storage_dtype).removeprefix("torch."),
         "compute_dtype": "float32",
+        "encoder_batch_size": batch_size,
         "torch_version": torch.__version__,
         "observation_layer_norm": False,
         "target_layer_norm": True,
@@ -69,23 +72,32 @@ def build_cache(dataset, encoder, output_dir, *, encoder_metadata, storage_dtype
             "observations": {}, "targets": {},
         }
         metadata["episodes"][row["episode_id"]] = entry
-        # z_i always sees precisely its own two observed frames.
-        for end in config.observed_steps(max(decisions)):
-            frames = config.observation_frames(end)
-            video = dataset.decode_frames(episode_index, frames).unsqueeze(0).to(device)
-            z = encode_video_views(encoder, video)[0]
-            entry["observations"][str(end)] = save_feature(
-                z, f"episode{episode_index}_obs{end}", frames, config.tokens_per_block,
-            )
-        # y_future sees the full local ten-frame clip, then extra LN and selection.
-        for decision in decisions:
-            frames = [max(0, decision + offset) for offset in config.target_offsets]
-            video = dataset.decode_frames(episode_index, frames).unsqueeze(0).to(device)
-            target = encode_video_views(encoder, video)[0]
-            target = F.layer_norm(target, (target.shape[-1],))[config.tokens_per_block:]
-            entry["targets"][str(decision)] = save_feature(
-                target, f"episode{episode_index}_future{decision}", frames, config.future_tokens,
-            )
+        # Transform each real frame once when building dense caches. Clips remain
+        # independent Encoder examples; no temporal context leaks across clips.
+        decoded = dataset.decode_frames(episode_index, range(row["frames"])) if decode_episode else None
+        def video_for(frames):
+            return decoded[:, :, list(frames)] if decoded is not None else dataset.decode_frames(episode_index, frames)
+        observation_ends = sorted({end for t in decisions for end in config.observed_steps(t)})
+        for start in range(0, len(observation_ends), batch_size):
+            selected = observation_ends[start:start + batch_size]
+            frames = [config.observation_frames(end) for end in selected]
+            videos = torch.stack([video_for(f) for f in frames]).to(device)
+            features = encode_video_views(encoder, videos)
+            for end, f, z in zip(selected, frames, features):
+                entry["observations"][str(end)] = save_feature(
+                    z, f"episode{episode_index}_obs{end}", f, config.tokens_per_block)
+        # y_future sees each local ten-frame clip, then extra LN and selection.
+        for start in range(0, len(decisions), batch_size):
+            selected = decisions[start:start + batch_size]
+            frames = [[min(row["frames"] - 1, max(0, t + offset)) for offset in config.target_offsets]
+                      for t in selected]
+            videos = torch.stack([video_for(f) for f in frames]).to(device)
+            features = encode_video_views(encoder, videos)
+            features = F.layer_norm(features, (features.shape[-1],))[:, config.tokens_per_block:]
+            for decision, f, target in zip(selected, frames, features):
+                entry["targets"][str(decision)] = save_feature(
+                    target, f"episode{episode_index}_future{decision}", f, config.future_tokens)
+        del decoded
         print(f'[cache] episode={row["episode_id"]} observations={len(entry["observations"])} '
               f'targets={len(entry["targets"])}', flush=True)
     temporary = output / "manifest.json.tmp"
@@ -101,6 +113,8 @@ def main(argv=None):
     parser.add_argument("--cache-output", required=True)
     parser.add_argument("--storage-dtype", choices=("float32", "bfloat16"), default="float32")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--encoder-batch-size", type=int, default=1)
+    parser.add_argument("--decode-episode", action="store_true")
     cache_args, training_argv = parser.parse_known_args(argv)
     args = parse_args(["--policy-arch", "full_history", "--output-dir",
                        str(Path(cache_args.cache_output) / "preparation"), *training_argv])
@@ -111,7 +125,8 @@ def main(argv=None):
     try:
         build_cache(dataset, build_frozen_encoder(args), cache_args.cache_output,
                     encoder_metadata=encoder_signature(args),
-                    storage_dtype=getattr(torch, cache_args.storage_dtype), device=cache_args.device)
+                    storage_dtype=getattr(torch, cache_args.storage_dtype), device=cache_args.device,
+                    batch_size=cache_args.encoder_batch_size, decode_episode=cache_args.decode_episode)
     finally:
         dataset.close()
 

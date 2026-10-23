@@ -6,9 +6,13 @@ HISTORY_FACTORY = "vjepa_policy.datasets.rmbench_history:build_dataset"
 
 def add_history_args(parser):
     parser.add_argument("--policy-arch", choices=("legacy", "full_history"), default="legacy")
-    parser.add_argument("--history-model-version", choices=("v0", "v1"), default="v0",
-                        help="v0: full spatial history; v1: per-view 2x2 average-pooled history")
+    parser.add_argument("--history-model-version", choices=("v0", "v1", "v2"), default="v0",
+                        help="v0: full spatial history; v1: 2x2 pooling; v2: v1 with every-frame training decisions")
     parser.add_argument("--history-feature-cache", help="Frozen observation/target cache manifest")
+    parser.add_argument("--history-action-checkpointing", action="store_true",
+                        help="Recompute temporary action-attention KV concatenations during backward")
+    parser.add_argument("--history-shared-prefix", action="store_true",
+                        help="Group same-episode decisions and reuse their differentiable regular history within a batch")
     parser.add_argument("--history-episode-ids", nargs="+", help="Explicit diagnostic episode selection")
     parser.add_argument("--history-max-decision-step", type=int,
                         help="Explicit early-decision curriculum; prefixes remain complete")
@@ -17,8 +21,8 @@ def add_history_args(parser):
     parser.add_argument("--history-bucket-size", type=int, default=128,
                         help="Sort shuffled pools by prefix length; 0 disables bucketing")
     parser.add_argument("--history-encoder-batch-size", type=int, default=4)
-    parser.add_argument("--history-attention-backend", choices=("segmented", "dense"), default="segmented",
-                        help="Exact query-block SDPA, or bounded dense correctness reference")
+    parser.add_argument("--history-attention-backend", choices=("segmented", "flex", "dense"), default="segmented",
+                        help="Segmented SDPA, compiled block-sparse history attention, or bounded dense reference")
     return parser
 
 
@@ -42,7 +46,7 @@ def validate_history_args(args):
         view_layout="independent", action_dim=14, proprio_dim=14, max_state_dim=48,
         proprio_encoding="identity", context_len=128, lang_dim=4096, action_chunk_size=32,
         action_normalization="QUANTILE", state_normalization="QUANTILE",
-        clip_normalized=False, require_full_future_window=True, instruction_field="task",
+        clip_normalized=False, require_full_future_window=config.model_version != "v2", instruction_field="task",
         loss_exp=1.0,
     )
     for name, expected in fixed.items():

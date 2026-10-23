@@ -1,6 +1,7 @@
 """Flow matching over complete history and this decision's temporary future KV."""
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from .action_expert import ActionExpert
 from .memory_types import validate_decision_step
@@ -40,20 +41,56 @@ class MemoryActionExpert(ActionExpert):
         )
         if self.action_reads_future:
             context_valid = torch.cat((legal_history, future.layout.valid), dim=1)
-            layers = _HistoryFutureLayers(history.layers, future.layers) if self.attention_backend == "segmented" else tuple(
+            layers = _HistoryFutureLayers(history.layers, future.layers) if self.attention_backend in ("segmented", "flex") else tuple(
                 (torch.cat((h.key, f.key), dim=2), torch.cat((h.value, f.value), dim=2))
                 for h, f in zip(history.layers, future.layers)
             )
         else:
             context_valid = legal_history
             layers = tuple((h.key, h.value) for h in history.layers)
+        plan = None
+        if self.attention_backend in ("segmented", "flex"):
+            builder = validity_attention_plan
+            if self.attention_backend == "flex":
+                from .memory_flex_attention import flex_validity_attention_plan
+                builder = flex_validity_attention_plan
+            plan = builder(action_layout.valid, torch.cat((context_valid, action_layout.valid), dim=1))
+            if self.attention_backend == "flex":
+                from .memory_rotary import rotary_attention_plan
+                plan = rotary_attention_plan(plan, action_layout, self.blocks[0].attn.head_dim, self.rope_options)
         return layers, dict(
             context_valid=context_valid, action_valid=action_layout.valid,
             action_position_coords=action_layout.rope_coords, rope_options=self.rope_options,
-            memory_attention_plan=validity_attention_plan(
-                action_layout.valid, torch.cat((context_valid, action_layout.valid), dim=1),
-            ) if self.attention_backend == "segmented" else None,
+            memory_attention_plan=plan,
         )
+
+    @staticmethod
+    def _checkpointed_block(block, hidden, history, future, t_cond, condition, condition_valid, **options):
+        return block(hidden, torch.cat((history.key, future.key), dim=2),
+                     torch.cat((history.value, future.value), dim=2),
+                     t_cond, condition, condition_valid, **options)
+
+    def _run_blocks(self, tokens, predictor_kv, context_len, t_cond, condition_tokens,
+                    condition_valid, **options):
+        if not (self.training and getattr(self, "checkpoint_memory_blocks", False)
+                and isinstance(predictor_kv, _HistoryFutureLayers) and context_len is None):
+            return super()._run_blocks(tokens, predictor_kv, context_len, t_cond,
+                                       condition_tokens, condition_valid, **options)
+        hidden = tokens
+        for index, block in enumerate(self.blocks):
+            h, f = predictor_kv.history[index], predictor_kv.future[index]
+            hidden = checkpoint(self._checkpointed_block, block, hidden, h, f,
+                                t_cond, condition_tokens, condition_valid, use_reentrant=False, **options)
+        hidden, _ = self.final_norm(hidden, t_cond)
+        output = self.out_proj(hidden)
+        valid = options.get("action_valid")
+        return output.masked_fill(~valid[..., None], 0) if valid is not None else output
+
+    def _memory_condition(self, language, language_mask, state):
+        if getattr(self, "trim_condition_padding", True):
+            columns = language_mask.any(dim=0)
+            language, language_mask = language[:, columns], language_mask[:, columns]
+        return self.conditioner(language, language_mask, state)
 
     def forward_memory(self, history, future, actions, language, language_mask, state,
                        action_layout, *, noise=None, time=None):
@@ -68,7 +105,7 @@ class MemoryActionExpert(ActionExpert):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device, actions.dtype)
         noisy = (1 - time[:, None, None]) * noise + time[:, None, None] * actions
-        condition, condition_valid = self.conditioner(language, language_mask, state)
+        condition, condition_valid = self._memory_condition(language, language_mask, state)
         velocity = self._run_blocks(
             self._encode_actions(noisy, valid.expand_as(actions)),
             layers, None, self._time_cond((time * self.num_timestep_buckets).long()),
@@ -85,7 +122,7 @@ class MemoryActionExpert(ActionExpert):
         actions = self._initial_actions(layers[0][0], initial_noise=initial_noise, generator=generator)
         valid = action_layout.valid[..., None]
         actions = actions.masked_fill(~valid, 0)
-        condition, condition_valid = self.conditioner(language, language_mask, state)
+        condition, condition_valid = self._memory_condition(language, language_mask, state)
         step_size = 1.0 / self.num_inference_steps
         # H/F were computed once before this loop. Only the action stream evolves.
         for step in range(self.num_inference_steps):
