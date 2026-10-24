@@ -35,14 +35,26 @@ The recipe uses two camera views. `--max-views 4` sets view-embedding table capa
 
 ## Checkpoint resumption and other datasets
 
-`--predictor-init` imports only predictor weights. `--resume checkpoint_step*.pt` reloads trainable weights/progress and fast-forwards the schedule without AdamW moments. The policy training entry point also supports `--save-training-state`, writing atomic `resume_state.pt` with optimizer, scheduler, per-rank RNG and consumed data cursor; resume that file with identical data, world size, batch, seeds and schedule for full continuation. See [shared-storage A100 deployment](a1008_shared_training.md). Pass arguments through a supported Python entry point or wrapper; `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
+`--predictor-init` imports only predictor weights. With `--save-training-state`, the trainer atomically writes `resume_state.pt` containing weights, AdamW, scheduler, per-rank random states and data cursor; `--resume` restores the complete state when data, topology, batch and full schedule match. Ordinary `checkpoint_step*.pt` remain weight/progress exports and only support a weight restart with schedule fast-forwarding. Pass these to a supported Python entry point or a wrapper that forwards arguments. `scripts/gr1/train.sh` only accepts the encoder name as its positional argument.
 
 The generic entry points are `scripts/pretrain_predictor.py` for predictor-only pretraining and `scripts/train_vjepa_policy.py` for downstream joint training. See [Extension contracts](extensions.md) for `--dataset-factory`, camera order, tensor shapes, and encoder registration. For RoboCasa-GR1, use its [preparation/training guide](../scripts/gr1/README.md) and [evaluation example](../examples/gr1/README.md).
 
 
 The Python entry points accept `--stop-at ISO8601_WITH_TIMEZONE` and `--stop-file PATH` at optimizer boundaries. Check `training_result.json` for actual completion. `--save-initial-checkpoint` saves an untrained comparison. DDP uses gradient bucket views; preserve `zero_grad(set_to_none=True)` and measure capacity with the selected accumulation and longest history.
 
+`--stop-after-step N` saves and exits at an absolute optimizer step while retaining the full `--max-steps` learning-rate schedule; `training_result.json` reports `stage_boundary`. It is an update boundary, not a wall-clock deadline. See [serial training and evaluation](full_history_staged_training.md) for checkpoint retention and continuation after rollout errors.
+
+
+## Full-History memory
+
+For every-frame training anchors, use `--history-model-version v2` and read [dense sampling and compute reuse](full_history_v2_dense.md). v2 retains the full dataset including masked action tails, keeps 16-step online replanning, and supports exact shared-prefix/FlexAttention computation without increasing trainable capacity.
 
 ## Full-History v0
 
+The optional `--history-model-version v1` adds per-view spatial compression of observed history before the Predictor; see [the v1 definition and diagnostics](full_history_v1_spatial.md). Omit this flag or pass `v0` to preserve the original full-resolution history. Both versions keep the same full temporal prefixes and future supervision. Saved model metadata determines the version during inference.
+
 The default policy architecture remains legacy. Use the explicit full_history route for native RMBench complete-prefix training, frozen observation/target feature caches, versioned checkpoints and strict reconstruction; see [M3 training integration](full_history_v0_m3.md) for commands, diagnostic selection and resume semantics. Full-history defaults to exact segmented SDPA; `--history-attention-backend dense` selects the bounded reference. See [attention optimization and capacity measurements](full_history_attention.md) before choosing a training batch/history length.
+
+For shared-storage eight-A100 training, use [the deployment guide](a1008_shared_training.md). Its default is `--history-model-version v2_full --text-encoder bert`: dense anchors with per-view 14x14 history, eight GPUs x batch two x accumulation one, 25 epochs. Generic CLI v0/T5 defaults and existing v0/v1/v2 contracts stay stable. Explicit BERT selects 128x768 frozen token features and a checkpoint version ending in `_bert`.
+
+On an already configured A100 server, `bash scripts/a1008/node.sh configs/a1008.local.env --dense-full --train-only` selects the new 25-epoch BERT/full-grid recipe after loading machine paths, so old local epoch/run-name overrides do not select the v0 experiment. Keep the preset flag for continuation.

@@ -1,4 +1,5 @@
 """Actual AdamW continuation: weights, moments, RNG, data cursor and retention."""
+import gc
 import importlib.util
 import os
 from pathlib import Path
@@ -34,12 +35,6 @@ class Data:
         return value
 
 
-class InterruptedTrainer(Trainer):
-    cutoff = 3
-    def _stop_requested(self):
-        return self.global_step >= self.cutoff
-
-
 class FullStateTests(unittest.TestCase):
     def test_uninterrupted_matches_resumed_across_epoch_boundary(self):
         def seed():
@@ -63,7 +58,8 @@ class FullStateTests(unittest.TestCase):
             expected = torch.load(Path(cfg["output_dir"]) / "resume_state.pt", weights_only=False)
             seed(); first_data = Data()
             first_cfg = dict(cfg, output_dir=root + "/partial")
-            first = InterruptedTrainer(model(first_data), first_data, lambda samples: samples[0], cfg=first_cfg)
+            first = Trainer(model(first_data), first_data, lambda samples: samples[0],
+                            cfg=dict(first_cfg, stop_after_step=3))
             first.train()
             resume_path = Path(first_cfg["output_dir"]) / "resume_state.pt"
             partial = torch.load(resume_path, weights_only=False)
@@ -89,3 +85,8 @@ class FullStateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "same data"):
                 Trainer(tiny_model(), Data(), lambda samples: samples[0],
                         cfg=dict(first_cfg, resume_from=str(resume_path), max_steps=8))
+            # Release mmap-backed optimizer tensors before NTFS/FUSE cleanup.
+            for trainer in (continuous, first, resumed):
+                trainer.accelerator.free_memory()
+            del trainer, continuous, first, resumed
+            gc.collect()

@@ -1,8 +1,4 @@
-"""M0 contracts for Full-History v0. No model imports or legacy defaults change.
-
-Model version (v0) and serialization schema version (1) are independent.
-These declarations do not implement a trainable memory policy.
-"""
+"""Versioned full-history contracts; v0 input sampling and defaults are stable."""
 from dataclasses import asdict, dataclass, fields
 from hashlib import sha256
 import json
@@ -52,10 +48,11 @@ class FullHistoryV0Config:
     action_reads_future: bool = True
 
     def __post_init__(self):
-        if self.model_version not in ("v0", "v0_bert"):
+        base_version = type(self).__dataclass_fields__["model_version"].default
+        if self.model_version not in (base_version, base_version + "_bert"):
             raise ValueError(f"Unsupported Full-History model version: {self.model_version!r}")
         language = {"model_version": self.model_version,
-                    "text_dim": 768 if self.model_version == "v0_bert" else 4096}
+                    "text_dim": 768 if self.text_encoder == "bert" else 4096}
         for field in fields(self):
             value = getattr(self, field.name)
             expected = language.get(field.name, field.default)
@@ -74,16 +71,30 @@ class FullHistoryV0Config:
         if text_encoder == "t5":
             return cls()
         if text_encoder == "bert":
-            return cls(model_version="v0_bert", text_dim=768)
+            version = cls.__dataclass_fields__["model_version"].default
+            return cls(model_version=version + "_bert", text_dim=768)
         raise ValueError(f"Unsupported text encoder: {text_encoder!r}")
 
     @property
     def text_encoder(self):
-        return "bert" if self.model_version == "v0_bert" else "t5"
+        return "bert" if self.model_version.endswith("_bert") else "t5"
+
+    @property
+    def dense_decisions(self):
+        return self.decision_interval_steps == 1
 
     @property
     def tokens_per_block(self):
+        """Uncompressed frozen Encoder tokens (also the cache format)."""
         return len(self.cameras) * (self.image_size // self.patch_size) ** 2
+
+    @property
+    def history_pool_size(self):
+        return getattr(self, "history_spatial_pool", 1)
+
+    @property
+    def history_tokens_per_block(self):
+        return self.tokens_per_block // self.history_pool_size ** 2
 
     @property
     def future_tokens(self):
@@ -156,10 +167,10 @@ class FullHistoryV0Config:
             "history_frame_indices": tuple(self.observation_frames(i) for i in ends),
             "history_state_indices": ends,
             "target_frame_indices": tuple(
-                max(0, decision_step + offset) for offset in self.target_offsets
+                min(episode_frames - 1, max(0, decision_step + offset)) for offset in self.target_offsets
             ),
             # The dataset has ALREADY shifted actions to next-state targets.
-            "action_indices": tuple(range(decision_step, decision_step + self.action_horizon)),
+            "action_indices": tuple(min(i, episode_frames - 1) for i in range(decision_step, decision_step + self.action_horizon)),
             "current_state_index": decision_step,
         }
 
@@ -177,6 +188,60 @@ class FullHistoryV0Config:
                 (decision_step + j + 1) / unit for j in range(self.action_horizon)
             ),
         }
+
+
+@dataclass(frozen=True)
+class FullHistoryV1Config(FullHistoryV0Config):
+    """Same full temporal prefix/targets, with per-view 2x2 average pooling of H."""
+
+    model_version: str = "v1"
+    history_spatial_pool: int = 2
+    history_compression: str = "per_view_avg_pool_before_predictor"
+    history_spatial_position: str = "original_patch_centers"
+
+
+@dataclass(frozen=True)
+class FullHistoryV2Config(FullHistoryV1Config):
+    """v1 architecture with dense training decisions and a current off-grid block."""
+
+    model_version: str = "v2"
+    schema_version: int = 2
+    decision_interval_steps: int = 1
+    execution_interval_steps: int = 16
+    history_endpoint_rule: str = "regular_grid_plus_current"
+    tail_policy: str = "clip_future_frames_mask_padded_actions"
+
+    def decision_steps(self, episode_frames):
+        _integer("episode_frames", episode_frames, minimum=1)
+        return tuple(range(episode_frames))
+
+    def observed_steps(self, end_step):
+        _integer("end_step", end_step)
+        regular = tuple(range(0, end_step + 1, self.history_interval_steps))
+        return regular if regular[-1] == end_step else (*regular, end_step)
+
+
+@dataclass(frozen=True)
+class FullHistoryV2FullConfig(FullHistoryV2Config):
+    """Dense decisions with the original per-view 14x14 history grid."""
+
+    model_version: str = "v2_full"
+    history_spatial_pool: int = 1
+    history_compression: str = "none"
+
+
+def full_history_config(version="v0", text_encoder=None):
+    # Checkpoint versions include the language suffix; CLI versions select the
+    # sampling/spatial recipe and --text-encoder selects its frozen text contract.
+    bert = version.endswith("_bert")
+    base = version.removesuffix("_bert") if bert else version
+    classes = {"v0": FullHistoryV0Config, "v1": FullHistoryV1Config,
+               "v2": FullHistoryV2Config, "v2_full": FullHistoryV2FullConfig}
+    if base not in classes:
+        raise ValueError(f"Unsupported full-history model version: {version!r}")
+    if bert and text_encoder not in (None, "bert"):
+        raise ValueError("Model version and text encoder disagree")
+    return classes[base].for_text_encoder(text_encoder or ("bert" if bert else "t5"))
 
 
 def _integer(name, value, minimum=0):
@@ -197,9 +262,10 @@ def contract_from_checkpoint_metadata(metadata):
         if "memory_schema" in metadata or "model_version" in metadata:
             raise ValueError("Legacy checkpoint contains incompatible memory version markers")
         return None
-    if arch != "full_history" or metadata.get("model_version") not in ("v0", "v0_bert"):
+    if arch != "full_history" or not isinstance(metadata.get("model_version"), str):
         raise ValueError("Unsupported policy architecture/model version")
-    config = FullHistoryV0Config.from_dict(metadata.get("memory_schema"))
+    cls = type(full_history_config(metadata["model_version"]))
+    config = cls.from_dict(metadata.get("memory_schema"))
     if config.policy_arch != arch or config.model_version != metadata["model_version"]:
         raise ValueError("Checkpoint architecture and memory schema disagree")
     return config

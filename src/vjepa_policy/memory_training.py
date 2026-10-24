@@ -1,5 +1,5 @@
 """CLI contract for the native RMBench Full-History v0 training route."""
-from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.memory_config import FullHistoryV0Config, full_history_config
 
 HISTORY_FACTORY = "vjepa_policy.datasets.rmbench_history:build_dataset"
 
@@ -7,8 +7,17 @@ HISTORY_FACTORY = "vjepa_policy.datasets.rmbench_history:build_dataset"
 def add_history_args(parser):
     parser.add_argument("--policy-arch", choices=("legacy", "full_history"), default="legacy")
     parser.add_argument("--text-encoder", choices=("t5", "bert"), default="t5",
-                        help="Frozen text features; BERT selects the explicit v0_bert contract")
+                        help="Frozen text features; BERT uses an explicit 768-dimensional contract")
+    parser.add_argument("--history-model-version", choices=("v0", "v1", "v2", "v2_full"), default="v0",
+                        help="v0: original grid; v1: pooling; v2: dense pooled; v2_full: dense 14x14")
     parser.add_argument("--history-feature-cache", help="Frozen observation/target cache manifest")
+    parser.add_argument("--history-feature-packed", help="Lossless packed storage index for the same frozen cache")
+    parser.add_argument("--history-feature-warm-observations", action="store_true",
+                        help="Single-process only: warm observations; with torchrun use the packer --warm-only first")
+    parser.add_argument("--history-action-checkpointing", action="store_true",
+                        help="Recompute temporary action-attention KV concatenations during backward")
+    parser.add_argument("--history-shared-prefix", action="store_true",
+                        help="Group same-episode decisions and reuse their differentiable regular history within a batch")
     parser.add_argument("--history-episode-ids", nargs="+", help="Explicit diagnostic episode selection")
     parser.add_argument("--history-max-decision-step", type=int,
                         help="Explicit early-decision curriculum; prefixes remain complete")
@@ -17,8 +26,8 @@ def add_history_args(parser):
     parser.add_argument("--history-bucket-size", type=int, default=128,
                         help="Sort shuffled pools by prefix length; 0 disables bucketing")
     parser.add_argument("--history-encoder-batch-size", type=int, default=4)
-    parser.add_argument("--history-attention-backend", choices=("segmented", "dense"), default="segmented",
-                        help="Exact query-block SDPA, or bounded dense correctness reference")
+    parser.add_argument("--history-attention-backend", choices=("segmented", "flex", "dense"), default="segmented",
+                        help="Segmented SDPA, compiled block-sparse history attention, or bounded dense reference")
     return parser
 
 
@@ -35,7 +44,8 @@ def set_history_defaults(parser, text_encoder="t5"):
 
 
 def validate_history_args(args):
-    config = FullHistoryV0Config.for_text_encoder(getattr(args, "text_encoder", "t5"))
+    config = full_history_config(getattr(args, "history_model_version", "v0"),
+                                 getattr(args, "text_encoder", "t5"))
     fixed = dict(
         encoder=config.encoder, encoder_family="vjepa2_1", model_name="vit_large",
         encoder_checkpoint_key="ema_encoder", crop_size=224, patch_size=16, tubelet_size=2,
@@ -43,7 +53,7 @@ def validate_history_args(args):
         view_layout="independent", action_dim=14, proprio_dim=14, max_state_dim=48,
         proprio_encoding="identity", context_len=config.text_length, lang_dim=config.text_dim, action_chunk_size=32,
         action_normalization="QUANTILE", state_normalization="QUANTILE",
-        clip_normalized=False, require_full_future_window=True, instruction_field="task",
+        clip_normalized=False, require_full_future_window=not config.dense_decisions, instruction_field="task",
         loss_exp=1.0,
     )
     for name, expected in fixed.items():
@@ -56,6 +66,8 @@ def validate_history_args(args):
             raise ValueError(f"Full-History v0 does not support {name}")
     if args.dataset_factory != HISTORY_FACTORY:
         raise ValueError(f"Full-History v0 requires --dataset-factory {HISTORY_FACTORY}")
+    if getattr(args, "history_feature_packed", None) and not args.history_feature_cache:
+        raise ValueError("--history-feature-packed requires the original --history-feature-cache manifest")
     if args.history_encoder_batch_size < 1 or args.history_bucket_size < 0:
         raise ValueError("Invalid history encoding batch size or bucket size")
     if args.max_history_blocks is not None and args.max_history_blocks < 1:
@@ -81,11 +93,11 @@ def validate_predictor_transfer(checkpoint, predictor):
             raise ValueError(f"Predictor transfer requires source {key}={value!r}; metadata missing or incompatible")
 
 
-def validate_reference_capacity(dataset, batch_size):
+def validate_reference_capacity(dataset, batch_size, config=None):
     """Fail before training, rather than hitting a late decision mid-epoch."""
     from vjepa_policy.models.memory_masks import DEFAULT_MAX_MASK_ELEMENTS
-    config = FullHistoryV0Config()
-    history = max(dataset.history_lengths) * config.tokens_per_block
+    config = config or FullHistoryV0Config()
+    history = max(dataset.history_lengths) * config.history_tokens_per_block
     future, action = config.future_tokens, config.action_horizon
     elements = batch_size * max(history * history, future * (history + future),
                                 action * (history + future + action))

@@ -14,7 +14,7 @@ import torch
 from vjepa_policy.datasets import ActionStateNormalizer, DEFAULT_PROMPT, VideoClipTransform
 from vjepa_policy.datasets.rmbench import decode_joint_actions
 from vjepa_policy.history_features import sha256_file
-from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.memory_config import FullHistoryV0Config, contract_from_checkpoint_metadata
 from vjepa_policy.memory_checkpoint import load_full_history_checkpoint
 from vjepa_policy.models.history_cache import HistoryKVCache, HistoryBlock, HistoryCacheError
 from vjepa_policy.models.memory_layouts import visual_layout
@@ -222,7 +222,18 @@ class MemoryPolicyServing:
     def _reset(self, sid, request, owner):
         if len(self.sessions) >= self.max_sessions:
             raise HistoryCacheError("session_capacity_exceeded", "maximum active sessions reached")
-        if request["protocol"] != PROTOCOL or FullHistoryV0Config.from_dict(request["sampling_config"]) != self.config:
+        # The wire sampling protocol is unchanged by history feature compression.
+        schema = request["sampling_config"]
+        if not isinstance(schema, dict):
+            raise ValueError("sampling_config must be an object")
+        requested = contract_from_checkpoint_metadata({
+            "policy_arch": "full_history", "model_version": schema.get("model_version"),
+            "memory_schema": schema,
+        })
+        # Legacy v0 clients use the same online 4-step observation grid and
+        # 16-step execution cadence; require matching frozen text semantics.
+        wire_v0 = FullHistoryV0Config.for_text_encoder(self.config.text_encoder)
+        if request["protocol"] != PROTOCOL or requested not in (self.config, wire_v0):
             raise ValueError("memory protocol/sampling configuration mismatch")
         episode_id = _identifier(request["episode_id"], "episode_id")
         instruction = request["instruction"]
@@ -279,7 +290,13 @@ class MemoryPolicyServing:
                  for camera in self.config.cameras]
         video = torch.stack(clips).permute(0, 2, 1, 3, 4)[None].to(self.device)
         # One block per encoder call, matching the M3 reproducibility reference.
-        latent = encode_video_views(self.model.encoder, video)
+        if self.config.dense_decisions:
+            # Frozen v2 training features are encoded in FP32, independently of
+            # Predictor/action autocast. Preserve that precision online too.
+            with torch.autocast(self.device.type, enabled=False):
+                latent = encode_video_views(self.model.encoder, video.float())
+        else:
+            latent = encode_video_views(self.model.encoder, video)
         state = torch.from_numpy(block["state"].copy())[None]
         state = self.normalizer({"observation.state": state})["observation.state"]
         state = pack_normalized_state(state, self.config.max_state_dim).to(self.device)
@@ -288,9 +305,8 @@ class MemoryPolicyServing:
     def _layout(self, count, offset=0):
         ends = torch.arange(offset, offset + count, device=self.device)[None] * self.config.history_interval_steps
         p = self.model.predictor
-        return visual_layout(ends, torch.ones_like(ends, dtype=torch.bool),
-                             grid_height=p.grid_height, grid_width=p.grid_width, num_views=p.num_views,
-                             temporal_unit_steps=self.config.temporal_unit_steps, block_offset=offset)
+        return p.history_layout(ends, torch.ones_like(ends, dtype=torch.bool),
+                                temporal_unit_steps=self.config.temporal_unit_steps, block_offset=offset)
 
     def _append(self, sid, session, request):
         cache = session.cache
@@ -323,9 +339,9 @@ class MemoryPolicyServing:
         p = self.model.predictor
         total_tokens = (len(cache.records) + len(new)) * p.tokens_per_history_block
         query_tokens = total_tokens if replace else len(new) * p.tokens_per_history_block
-        if (p.attention_backend == "dense"
-                and max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS):
-            raise HistoryCacheError("history_capacity_exceeded", "dense reference mask budget exceeded; use segmented attention")
+        if (p.attention_backend == "dense" and
+                max(query_tokens * total_tokens, p.future_tokens * (total_tokens + p.future_tokens)) > DEFAULT_MAX_MASK_ELEMENTS):
+            raise HistoryCacheError("history_capacity_exceeded", "dense reference mask budget exceeded; M5 backend required")
         encoded = [self._encode_block(block) for block, _ in new]
         records = tuple(HistoryBlock(block["block_id"], block["end_step"], digest, item[1])
                         for (block, digest), item in zip(new, encoded))
@@ -347,7 +363,7 @@ class MemoryPolicyServing:
         if _integer(request["expected_revision"], "expected_revision") != cache.revision:
             raise HistoryCacheError("revision_conflict", "infer expected_revision is stale")
         step = _integer(request["decision_step"], "decision_step")
-        if not cache.records or step != cache.records[-1].end_step or step % self.config.decision_interval_steps:
+        if not cache.records or step != cache.records[-1].end_step or step % getattr(self.config, "execution_interval_steps", self.config.decision_interval_steps):
             raise ValueError("infer must use the latest committed observation on the decision grid")
         noise_seed = int(content_digest([self.seed, sid, session.episode_id, request["request_id"], cache.revision])[:16], 16) % (2**63)
         generator = torch.Generator(device=self.device).manual_seed(noise_seed)

@@ -5,6 +5,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .memory_masks import history_attention_mask, future_attention_mask
 from .memory_attention import history_attention_plan, future_attention_plan
+from .memory_layouts import visual_layout
 from .memory_types import HistoryEncoding, FutureEncoding, LayerKV, concatenate_layouts
 from .wm_predictor import WorldModelPredictor
 
@@ -12,25 +13,70 @@ from .wm_predictor import WorldModelPredictor
 class MemoryWorldModelPredictor(WorldModelPredictor):
     """Reuse Predictor weights while replacing the bidirectional H/F dataflow."""
 
-    def __init__(self, *args, attention_backend="segmented", **kwargs):
+    def __init__(self, *args, attention_backend="segmented", history_spatial_pool=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.attention_backend = attention_backend
+        if (type(history_spatial_pool) is not int or history_spatial_pool not in (1, 2)
+                or self.grid_height % history_spatial_pool or self.grid_width % history_spatial_pool):
+            raise ValueError("History pooling must be 1 or 2 and divide the Encoder grid")
+        self.history_spatial_pool = history_spatial_pool
 
     def _history_attention(self, query, key=None):
+        if self.attention_backend == "flex":
+            from .memory_flex_attention import flex_history_attention_plan
+            from .memory_rotary import rotary_attention_plan
+            plan = flex_history_attention_plan(query, key)
+            return rotary_attention_plan(plan, query, self.predictor_blocks[0].self_attn.head_dim, self.rope_options)
         builder = history_attention_plan if self.attention_backend == "segmented" else history_attention_mask
         return builder(query, key)
 
     def _future_attention(self, history, future, decision_step):
         builder = future_attention_plan if self.attention_backend == "segmented" else future_attention_mask
-        return builder(history, future, decision_step)
+        if self.attention_backend == "flex":
+            from .memory_flex_attention import flex_future_attention_plan
+            builder = flex_future_attention_plan
+        plan = builder(history, future, decision_step)
+        if self.attention_backend == "flex":
+            from .memory_rotary import rotary_attention_plan
+            return rotary_attention_plan(plan, future, self.predictor_blocks[0].self_attn.head_dim, self.rope_options)
+        return plan
 
     @property
-    def tokens_per_history_block(self):
+    def tokens_per_observation_block(self):
         return self.num_views * self.grid_height * self.grid_width
 
     @property
+    def tokens_per_history_block(self):
+        return self.tokens_per_observation_block // self.history_spatial_pool ** 2
+
+    @property
     def future_tokens(self):
-        return (self.grid_depth - 1) * self.tokens_per_history_block
+        return (self.grid_depth - 1) * self.tokens_per_observation_block
+
+    def history_layout(self, end_step, valid, *, temporal_unit_steps=8, block_offset=0):
+        s = self.history_spatial_pool
+        return visual_layout(
+            end_step, valid, grid_height=self.grid_height // s, grid_width=self.grid_width // s,
+            num_views=self.num_views, temporal_unit_steps=temporal_unit_steps,
+            block_offset=block_offset, spatial_stride=s,
+        )
+
+    def compress_history(self, observed_latents):
+        """Pool each frame/view independently before any trainable H computation.
+
+        RoPE retains the original grid basis; each pooled cell is located at its
+        source patch center. Future query/target geometry remains uncompressed.
+        """
+        batch, blocks, patches, width = observed_latents.shape
+        if patches != self.tokens_per_observation_block:
+            raise ValueError("History inputs must contain the uncompressed Encoder grid")
+        s = self.history_spatial_pool
+        if s == 1:
+            return observed_latents
+        cells = observed_latents.reshape(
+            batch, blocks, self.num_views, self.grid_height // s, s, self.grid_width // s, s, width,
+        )
+        return cells.mean(dim=(4, 6)).reshape(batch, blocks, self.tokens_per_history_block, width)
 
     @property
     def rope_options(self):
@@ -51,6 +97,14 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         if self.view_embedding is not None:
             tokens = tokens + self.view_embedding(layout.view_id.clamp(0, self.num_views - 1))
         return tokens.masked_fill(~layout.valid[..., None], 0)
+
+    def _condition_tokens(self, language, language_mask, proprio):
+        # Padding carries no information. Remove columns masked for the entire
+        # batch before projection, especially before expanding across H blocks.
+        if language_mask is not None and getattr(self, "trim_condition_padding", True):
+            columns = language_mask.any(dim=0)
+            language, language_mask = language[:, columns], language_mask[:, columns]
+        return super()._condition_tokens(language, language_mask, proprio)
 
     def _history_condition(self, state, language, language_mask):
         batch, blocks, width = state.shape
@@ -83,6 +137,7 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         )
 
     def forward_history(self, observed_latents, history_state, language, language_mask, history_layout):
+        observed_latents = self.compress_history(observed_latents)
         batch, blocks, patches, width = observed_latents.shape
         layout = history_layout
         group_valid = layout.valid.reshape(batch, blocks, patches)
@@ -112,13 +167,20 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         """
         if self.training:
             raise ValueError("append_history requires eval mode; training must recompute history")
+        return self.forward_history_append(prefix, observed_latents, history_state, language,
+                                           language_mask, history_layout)
+
+    def forward_history_append(self, prefix, observed_latents, history_state, language,
+                               language_mask, history_layout):
+        """Differentiable within-update append; never persisted across updates."""
+        observed_latents = self.compress_history(observed_latents)
         batch, blocks, patches, _ = observed_latents.shape
         layout = history_layout
         offset = 0 if prefix is None else prefix.layout.valid.shape[1] // patches
-        expected = torch.arange(offset, offset + blocks, device=layout.valid.device)
+        expected = (torch.arange(blocks, device=observed_latents.device) + offset)
         expected = expected.repeat_interleave(patches)[None].expand(batch, -1)
         if not torch.equal(layout.block_id, expected):
-            raise ValueError("appended block IDs must continue the committed prefix")
+            raise ValueError("append_history requires contiguous block IDs after the prefix")
         key_layout = layout if prefix is None else concatenate_layouts(prefix.layout, layout)
         mask = self._history_attention(layout, key_layout)
         tokens = self._memory_view_embeddings(
@@ -127,10 +189,12 @@ class MemoryWorldModelPredictor(WorldModelPredictor):
         condition, condition_valid = self._history_condition(history_state, language, language_mask)
         layers = []
         for index, block in enumerate(self.predictor_blocks):
-            tokens, key, value = self._history_block(
-                block, tokens, condition, condition_valid, layout, mask, blocks,
-                None if prefix is None else prefix.layers[index],
-            )
+            args = (block, tokens, condition, condition_valid, layout, mask, blocks,
+                    None if prefix is None else prefix.layers[index])
+            if self.training and index < self.activation_checkpointing_blocks:
+                tokens, key, value = checkpoint(self._history_block, *args, use_reentrant=False)
+            else:
+                tokens, key, value = self._history_block(*args)
             layers.append(LayerKV(key, value))
         return HistoryEncoding(tuple(layers), layout)
 

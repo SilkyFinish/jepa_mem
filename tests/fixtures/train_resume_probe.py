@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
-from test_memory_v0_model import model, batch
+from test_memory_v0_model import batch
+from test_memory_v1_spatial import model
 from vjepa_policy.trainer import Trainer
 from vjepa_policy.train_common import seed_process
 
@@ -25,11 +26,6 @@ class Data:
         sample = {k: v[:1] if torch.is_tensor(v) else v for k, v in sample.items()}
         sample["sample_index"] = index
         return sample
-
-
-class Cutoff(Trainer):
-    def _stop_requested(self):
-        return self.global_step >= 1
 
 
 def main():
@@ -50,9 +46,10 @@ def main():
                checkpoint_milestones=[2], recycle_workers_every=0, history_bucket_size=0)
     if args.mode == "resume":
         cfg["resume_from"] = str(args.output / "resume_state.pt")
+    if args.mode == "interrupt":
+        cfg["stop_after_step"] = 2
     with patch.object(Trainer, "_init_wandb", return_value=None):
-        cls = Cutoff if args.mode == "interrupt" else Trainer
-        trainer = cls(policy, Data(), lambda values: values[0], cfg=cfg)
+        trainer = Trainer(policy, Data(), lambda values: values[0], cfg=cfg)
         trainer.train()
     (args.output / f"{args.mode}-rank{os.environ['RANK']}.json").write_text(json.dumps(dict(
         seen=seen, step=trainer.global_step, peak_allocated_gib=torch.cuda.max_memory_allocated() / 2**30,

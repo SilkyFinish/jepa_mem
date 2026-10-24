@@ -28,3 +28,5 @@ configs/*.local.env
 .envs/
 third_party/
 /jepa_mem_assets/
+
+integration_artifacts/

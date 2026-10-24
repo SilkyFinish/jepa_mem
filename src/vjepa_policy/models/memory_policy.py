@@ -30,6 +30,8 @@ class FullHistoryVJEPAPolicy(nn.Module):
                  world_loss_weight=1.0, action_loss_weight=1.0):
         super().__init__()
         self.config = config or FullHistoryV0Config()
+        if predictor.history_spatial_pool != self.config.history_pool_size:
+            raise ValueError("Predictor history pooling differs from the model-version contract")
         self.encoder, self.predictor, self.action_expert = encoder, predictor, action_expert
         self.encoder_batch_size = encoder_batch_size
         self.strict_v0_inputs = strict_v0_inputs
@@ -75,10 +77,19 @@ class FullHistoryVJEPAPolicy(nn.Module):
         expected_valid = torch.arange(blocks, device=state.device)[None] < lengths[:, None]
         if not torch.equal(valid, expected_valid):
             raise ValueError("history_valid must be a right-padded prefix")
-        expected_ends = torch.arange(blocks, device=state.device)[None] * self.config.history_interval_steps
+        interval = self.config.history_interval_steps
+        expected_ends = torch.arange(blocks, device=state.device)[None] * interval
+        if getattr(self.config, "history_endpoint_rule", None) == "regular_grid_plus_current":
+            # Every regular observation is retained. Off-grid decisions add their
+            # own current observation without moving or replacing earlier blocks.
+            expected_lengths = torch.div(decision + interval - 1, interval, rounding_mode="floor") + 1
+            expected_ends = torch.minimum(expected_ends, decision[:, None])
+        else:
+            expected_lengths = torch.div(decision, interval, rounding_mode="floor") + 1
         if ((ends != expected_ends) & valid).any():
             raise ValueError("history must include every observation from episode start without gaps")
-        if ((lengths - 1) * self.config.history_interval_steps != decision).any():
+        last_ends = ends.gather(1, (lengths - 1)[:, None]).squeeze(1)
+        if (decision < 0).any() or (lengths != expected_lengths).any() or (last_ends != decision).any():
             raise ValueError("history must end exactly at decision_step")
         if (decision % self.config.decision_interval_steps != 0).any():
             raise ValueError("decision_step is outside the v0 decision grid")
@@ -112,7 +123,7 @@ class FullHistoryVJEPAPolicy(nn.Module):
     def encode_observed_blocks(self, batch):
         valid = batch["history_valid"]
         batch_size, blocks = valid.shape
-        patches, width = self.predictor.tokens_per_history_block, self.predictor.predictor_embed.in_features
+        patches, width = self.predictor.tokens_per_observation_block, self.predictor.predictor_embed.in_features
         if "history_latents" in batch:
             latents = batch["history_latents"].detach()
         else:
@@ -127,6 +138,15 @@ class FullHistoryVJEPAPolicy(nn.Module):
             encoded = torch.cat(pieces)
             latents = encoded.new_zeros(batch_size, blocks, patches, width)
             latents[valid] = encoded
+        index = batch.get("history_latent_index")
+        if index is not None:
+            if ("history_latents" not in batch or index.shape != valid.shape or index.dtype != torch.long
+                    or latents.ndim != 3 or latents.shape[1:] != (patches, width)
+                    or index.device != latents.device or (index < 0).any() or (index >= len(latents)).any()):
+                raise ValueError("Invalid compact observation tensor/index")
+            if not latents.is_floating_point() or not torch.isfinite(latents).all():
+                raise ValueError("Compact observation features must be finite floating point")
+            return latents
         if latents.shape != (batch_size, blocks, patches, width):
             raise ValueError("history_latents must match [B,K,P,D_encoder]")
         if not latents.is_floating_point() or not torch.isfinite(latents[valid]).all():
@@ -147,7 +167,7 @@ class FullHistoryVJEPAPolicy(nn.Module):
             self.encoder.eval()
             target = encode_video_views(self.encoder, video)
             target = F.layer_norm(target, (target.shape[-1],))
-            target = target[:, self.predictor.tokens_per_history_block:]
+            target = target[:, self.predictor.tokens_per_observation_block:]
         valid = batch["future_valid"]
         return target.masked_fill(~valid[..., None], 0)
 
@@ -157,11 +177,19 @@ class FullHistoryVJEPAPolicy(nn.Module):
         packed_history = pack_normalized_state(raw_state, self.config.max_state_dim)
         packed_history = packed_history.masked_fill(~valid[..., None], 0)
         packed_current = pack_normalized_state(batch["current_state"], self.config.max_state_dim)
-        geometry = dict(grid_height=self.predictor.grid_height, grid_width=self.predictor.grid_width,
-                        num_views=self.predictor.num_views, temporal_unit_steps=self.config.temporal_unit_steps)
-        hl = visual_layout(ends, valid, **geometry)
+        hl = self.predictor.history_layout(ends, valid, temporal_unit_steps=self.config.temporal_unit_steps)
         z = self.encode_observed_blocks(batch)
-        history = self.predictor.forward_history(z, packed_history, language, batch["language_mask"], hl)
+        if (self.training and getattr(self, "share_history_prefixes", False)
+                and len(batch.get("episode_id", [])) > 1
+                and len(set(batch["episode_id"])) == 1):
+            from .shared_history import encode_shared_history
+            history = encode_shared_history(self.predictor, z, packed_history, language,
+                                            batch["language_mask"], ends, valid, batch["decision_step"],
+                                            self.config, latent_index=batch.get("history_latent_index"))
+        else:
+            if "history_latent_index" in batch:
+                z = z[batch["history_latent_index"]].masked_fill(~valid[..., None, None], 0)
+            history = self.predictor.forward_history(z, packed_history, language, batch["language_mask"], hl)
         return history, packed_current, language, z.dtype
 
     def _future_layout(self, decision_step, valid=None):
@@ -180,6 +208,14 @@ class FullHistoryVJEPAPolicy(nn.Module):
         return history, future, current, language, dtype
 
     def forward(self, batch, *, flow_noise=None, flow_time=None):
+        episodes = batch.get("episode_id", []) if isinstance(batch, dict) else []
+        if (self.training and getattr(self, "share_history_prefixes", False)
+                and len(episodes) > 1 and len(set(episodes)) > 1):
+            from .shared_history import checkpoint_independent_samples
+            return checkpoint_independent_samples(self, batch, flow_noise, flow_time)
+        return self._forward_batch(batch, flow_noise=flow_noise, flow_time=flow_time)
+
+    def _forward_batch(self, batch, *, flow_noise=None, flow_time=None):
         self._validate_observations(batch)
         actions = batch.get("action")
         action_valid = ~batch["action_is_pad"]
@@ -204,8 +240,8 @@ class FullHistoryVJEPAPolicy(nn.Module):
         )
         self.forward_dtypes = {
             "clips": batch.get("history_video", batch.get("history_latents")).dtype,
-            "encoder": encoder_dtype, "predictor_k": history.layers[0].key.dtype,
-            "predictor_v": history.layers[0].value.dtype, "action": velocity.dtype, "loss": loss.dtype,
+            "encoder": encoder_dtype, "predictor_k": history.layers[0].dtype,
+            "predictor_v": history.layers[0].dtype, "action": velocity.dtype, "loss": loss.dtype,
         }
         return loss, dict(loss=loss.detach(), loss_world=loss_world.detach(),
                           loss_action=loss_action.detach(), cos_sim=cosine.detach())

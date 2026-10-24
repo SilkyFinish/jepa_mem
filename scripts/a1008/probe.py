@@ -1,4 +1,4 @@
-"""Real NCCL and two longest-prefix AdamW updates, using the production Trainer."""
+"""Real NCCL and three longest/mixed-prefix AdamW updates, using the production Trainer."""
 import argparse
 from datetime import timedelta
 import json
@@ -28,48 +28,56 @@ def collective(output):
         dist.destroy_process_group()
 
 
+def attention(output):
+    import io
+    import unittest
+    from scripts.a1008.common import REPO
+    if not torch.cuda.is_available():
+        raise RuntimeError("FlexAttention validation requires a CUDA device")
+    suite = unittest.defaultTestLoader.discover(
+        str(REPO / "tests"), pattern="test_memory_flex_attention.py")
+    stream = io.StringIO()
+    result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+    print(stream.getvalue(), flush=True)
+    Path(output).write_text(json.dumps(dict(
+        ok=result.wasSuccessful() and not result.skipped, tests=result.testsRun,
+        skipped=len(result.skipped), torch=torch.__version__,
+        gpu=torch.cuda.get_device_name())) + "\n")
+    if result.testsRun != 3 or not result.wasSuccessful() or result.skipped:
+        raise RuntimeError("Compiled FlexAttention forward/backward parity checks failed")
+
+
 def stress(argv):
-    from scripts import train_vjepa_policy as entry
-    from vjepa_policy.train_common import build_dataset_collator
+    from scripts.benchmark_history_training import main as benchmark
+    from scripts.train_vjepa_policy import parse_args
     from scripts.a1008.common import schedule
-    world = int(os.environ["WORLD_SIZE"])
-
-    class Longest:
-        def __init__(self, data):
-            self.data = data
-            self.index = max(range(len(data)), key=lambda i: data.history_lengths[i])
-            self.history_lengths = [data.history_lengths[self.index]] * 32
-            self.provenance = dict(data.provenance, diagnostic="repeated longest sample, two updates")
-            self.batch_schema = data.batch_schema
-        def __len__(self):
-            return 32
-        def __getitem__(self, index):
-            return self.data[self.index]
-
-    def builder(args, **kwargs):
-        data, collator = build_dataset_collator(args, **kwargs)
-        return Longest(data), collator
-    builder.supports_local_layout = True
-    args = entry.parse_args([*argv, "--max-steps", "2", "--num-workers", "0"])
-    plan = schedule(32, world, 1, args.batch_size)
-    args.gradient_accumulation_steps = plan["accumulation"]
-    start = time.time()
-    entry.main(args=args, dataset_collator_builder=builder)
+    args = parse_args(argv)
+    plan = schedule(48, int(os.environ["WORLD_SIZE"]), 1, args.batch_size)
+    options = ["--benchmark-stress-updates", "3"]
+    if args.batch_size >= 2:
+        options.append("--benchmark-stress-mixed-episodes")
+    benchmark([*options, *argv, "--max-steps", "3", "--num-workers", "0",
+               "--gradient-accumulation-steps", str(plan["accumulation"])])
     if int(os.environ["RANK"]) == 0:
+        report = json.loads(Path(args.output_dir, "rank0_timing.json").read_text())
+        if report["status"] != "passed" or report["actual_updates"] != 3:
+            raise RuntimeError("Longest/mixed history stress did not complete")
         Path(args.output_dir, "stress.json").write_text(json.dumps(dict(
-            ok=True, diagnostic=True, updates=2, seconds=time.time() - start,
-            world_size=world, per_device_batch=args.batch_size,
-            accumulation=args.gradient_accumulation_steps, global_batch=plan["global_batch"],
-            peak_allocated_gib=torch.cuda.max_memory_allocated() / 2**30,
-            peak_reserved_gib=torch.cuda.max_memory_reserved() / 2**30)) + "\n")
+            ok=True, diagnostic=True, updates=3, world_size=plan["world_size"],
+            per_device_batch=args.batch_size, accumulation=plan["accumulation"],
+            global_batch=16, mixed_episode_stress=args.batch_size >= 2,
+            history_tokens_per_block=report["history_tokens_per_block"],
+            steps=report["steps"])) + "\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("collective", "stress"), required=True)
+    parser.add_argument("--mode", choices=("collective", "attention", "stress"), required=True)
     parser.add_argument("--output")
     args, rest = parser.parse_known_args()
     if args.mode == "collective":
         collective(args.output)
+    elif args.mode == "attention":
+        attention(args.output)
     else:
         stress(rest)

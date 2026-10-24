@@ -27,6 +27,10 @@ def evaluate(args):
     env, transport, session = None, None, None
     complete, error = False, None
     diagnostic = args.max_steps != 0 or args.controller != "native_qpos"
+    def progress(phase, **values):
+        path = output / "progress.json"
+        path.with_suffix(".tmp").write_text(json.dumps(dict(phase=phase, updated_at=time.time(), **values)) + "\n")
+        path.with_suffix(".tmp").replace(path)
     try:
         transport = WebsocketClientPolicy(host=args.host, port=args.port)
         if transport.get_server_metadata().get("protocol") != "rmbench_memory_v0":
@@ -37,6 +41,7 @@ def evaluate(args):
                     raise RuntimeError("Expert seed search exhausted")
                 attempts += 1
                 seed, candidate = candidate, candidate + 1
+                progress("expert_filter", trial=trial, seed=seed)
                 env, _, instruction = make_environment(root, seed, existing=env)
                 try:
                     env.play_once()
@@ -51,10 +56,12 @@ def evaluate(args):
             if args.instruction is not None:
                 instruction = args.instruction
                 env.set_instruction(instruction)
-            session = MemorySessionClient(transport)
+            # Serving noise includes session ID; keep it stable across checkpoints.
+            session = MemorySessionClient(transport, session_id=f"put_back_block-{seed}-{trial}")
             collector = HistoryCollector(config=session.config)
             start, queries, episode_error = time.time(), 0, None
             step_limit = min(env.step_lim, args.max_steps) if args.max_steps else env.step_lim
+            progress("policy_rollout", trial=trial, seed=seed, steps=0, step_limit=step_limit)
             try:
                 session.reset(f"put_back_block:{seed}:{trial}", instruction)
                 collect(collector, env)
@@ -62,6 +69,7 @@ def evaluate(args):
                     session.append(collector)
                     actions = session.infer(int(env.take_action_cnt))
                     queries += 1
+                    progress("policy_rollout", trial=trial, seed=seed, steps=int(env.take_action_cnt), queries=queries)
                     for action in actions[:16]:
                         if args.controller == "native_qpos":
                             env.take_action(action, action_type="qpos")
@@ -97,6 +105,7 @@ def evaluate(args):
                 with (output / "episodes.jsonl").open("a") as stream:
                     stream.write(json.dumps(row) + "\n")
                 print(json.dumps(row), flush=True)
+                progress("episode_complete", trial=trial, seed=seed, episodes=len(episodes))
                 if cleanup_error is not None and episode_error is None:
                     raise cleanup_error
         complete = True

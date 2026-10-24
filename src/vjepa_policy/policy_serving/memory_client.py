@@ -4,7 +4,7 @@ import uuid
 
 import numpy as np
 
-from vjepa_policy.memory_config import FullHistoryV0Config
+from vjepa_policy.memory_config import FullHistoryV0Config, contract_from_checkpoint_metadata
 
 
 class HistoryCollector:
@@ -66,8 +66,8 @@ class MemorySessionClient:
         if config is None:
             metadata = (transport.get_server_metadata() if hasattr(transport, "get_server_metadata")
                         else getattr(transport, "metadata", None))
-            config = (FullHistoryV0Config.from_dict(metadata.get("memory_schema"))
-                      if metadata is not None else FullHistoryV0Config())
+            config = (contract_from_checkpoint_metadata(metadata)
+                      if metadata is not None else None) or FullHistoryV0Config()
         self.config = config
         self.session_id = session_id or uuid.uuid4().hex
         self.revision = 0

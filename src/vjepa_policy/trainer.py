@@ -104,7 +104,28 @@ class _EpochRandomSampler(Sampler):
         generator.manual_seed(self.seed + self.epoch)
         self._order = torch.randperm(len(self.data_source), generator=generator)
         lengths = getattr(self.data_source, "history_lengths", None)
-        if lengths is not None and self.bucket_size:
+        if getattr(self.data_source, "share_history_prefixes", False) and self.batch_size > 1:
+            # Every anchor appears exactly once. Random cyclic offsets change
+            # adjacent-anchor grouping each epoch; shuffle groups, not rows.
+            episodes = {}
+            for i, (episode, decision) in enumerate(self.data_source.index):
+                episodes.setdefault(episode, []).append(i)
+            batches, leftovers = [], []
+            for indices in episodes.values():
+                shift = int(torch.randint(len(indices), (1,), generator=generator))
+                indices = indices[shift:] + indices[:shift]
+                stop = len(indices) // self.batch_size * self.batch_size
+                batches.extend(indices[i:i+self.batch_size] for i in range(0,stop,self.batch_size))
+                leftovers.extend(indices[stop:])
+            if leftovers:
+                order = torch.randperm(len(leftovers), generator=generator).tolist()
+                leftovers = [leftovers[i] for i in order]
+                stop = len(leftovers) // self.batch_size * self.batch_size
+                batches.extend(leftovers[i:i+self.batch_size] for i in range(0,stop,self.batch_size))
+                leftovers = leftovers[stop:]
+            order = torch.randperm(len(batches), generator=generator).tolist()
+            self._order = torch.tensor([i for b in order for i in batches[b]] + leftovers, dtype=torch.long)
+        elif lengths is not None and self.bucket_size:
             # Random pools, locally sorted lengths, then shuffled whole batches.
             # One index per sample; worker recycling retains this same order.
             pool = max(self.batch_size, self.bucket_size // self.batch_size * self.batch_size)
@@ -145,6 +166,9 @@ class Trainer:
         self.cfg = cfg
         self.stop_at = deadline_timestamp(cfg.get("stop_at"))
         self.stop_file = cfg.get("stop_file")
+        self.stop_after_step = cfg.get("stop_after_step")
+        if self.stop_after_step is not None and (type(self.stop_after_step) is not int or self.stop_after_step <= 0):
+            raise ValueError("stop_after_step must be a positive absolute optimizer step")
         self.output_dir = cfg["output_dir"]
         self.max_grad_norm = cfg["max_grad_norm"]
         os.makedirs(self.output_dir, exist_ok=True)
@@ -625,9 +649,10 @@ class Trainer:
         logger.info("[ckpt] saved %s", path)
 
     def _stop_requested(self):
-        if self.stop_at is None and not self.stop_file:
+        if self.stop_at is None and not self.stop_file and self.stop_after_step is None:
             return False
-        local = stop_requested(self.stop_at, self.stop_file)
+        local = (self.stop_after_step is not None and self.global_step >= self.stop_after_step)
+        local = local or stop_requested(self.stop_at, self.stop_file)
         flag = torch.tensor([int(local)], device=self.accelerator.device)
         # Every rank takes the same branch, even across a deadline boundary.
         return bool(self.accelerator.reduce(flag, reduction="sum").item())
@@ -845,7 +870,9 @@ class Trainer:
         if self.accelerator.is_main_process:
             result = {
                 "completed": self.global_step >= self.max_steps,
-                "stop_reason": "max_steps" if self.global_step >= self.max_steps else "stop_requested",
+                "stop_reason": ("max_steps" if self.global_step >= self.max_steps else
+                                "stage_boundary" if self.stop_after_step is not None and self.global_step >= self.stop_after_step
+                                else "stop_requested"),
                 "step": self.global_step, "max_steps": self.max_steps,
                 "optimizer_steps_per_epoch": self.optimizer_steps_per_epoch,
                 "checkpoint": f"checkpoint_step{self.global_step:06d}.pt",

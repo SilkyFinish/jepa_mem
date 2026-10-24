@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import urllib.request
 
 from scripts.a1008.common import (
     REPO, asset_sources, base_args, paths, per_device_batch, schedule, serving_capacity, sha256,
-    text_encoder, train_only, write_json,
+    text_encoder, train_only, write_json, dataset_dimensions, recipe_config, feature_args, flag, missing_packed_bytes,
 )
 
 
@@ -32,7 +33,13 @@ class Job:
             raise ValueError("JEPA_RUN_NAME must be one directory name")
         self.root = self.p["root"] / "runs" / name
         self.world = int(os.environ.get("JEPA_GPUS", "8"))
-        self.plan = schedule(1013, self.world, int(os.environ.get("JEPA_EPOCHS", "100")), per_device_batch())
+        self.plan = schedule(dataset_dimensions(self.p)[0], self.world,
+                             int(os.environ.get("JEPA_EPOCHS", "100")), per_device_batch())
+        self.recipe = dict(contract=recipe_config().to_dict(),
+                           attention=os.environ.get("JEPA_HISTORY_BACKEND", "segmented"),
+                           shared_prefix=flag("JEPA_SHARED_PREFIX"),
+                           action_checkpointing=flag("JEPA_ACTION_CHECKPOINTING"),
+                           predictor_checkpoint_blocks=int(os.environ.get("JEPA_CHECKPOINT_BLOCKS", "24")))
         self.children = []
         self.stopping = False
         self.phase = "starting"
@@ -101,11 +108,18 @@ class Job:
             hardware.append(dict(index=i, name=prop.name, total_gib=total / 2**30, free_gib=free / 2**30))
         report = dict(gpus=hardware, torch=torch.__version__, cuda=torch.version.cuda,
                       environment={k: v for k, v in os.environ.items() if k.startswith("NCCL_")
-                                   or k in ("CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF")})
+                                   or k in ("CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF",
+                                            "TORCHINDUCTOR_COMPILE_THREADS", "TORCHINDUCTOR_CACHE_DIR",
+                                            "TRITON_CACHE_DIR", "CUDA_CACHE_PATH", "TMPDIR",
+                                            "OMP_NUM_THREADS", "MKL_NUM_THREADS")})
         write_json(self.attempt / "hardware.json", report)
         self.command("topology", ["nvidia-smi", "topo", "-m"])
         self.command("nccl", [*self.distributed(), "-m", "scripts.a1008.probe", "--mode", "collective",
                               "--output", self.attempt / "nccl.json"], timeout=300)
+        if self.recipe["attention"] == "flex":
+            self.command("attention_parity", [sys.executable, "-m", "scripts.a1008.probe",
+                "--mode", "attention", "--output", self.attempt / "attention_parity.json"],
+                env=one_gpu_env(), timeout=900)
 
     def caches(self):
         from scripts.a1008.prepare_assets import verify_prepared
@@ -116,6 +130,23 @@ class Job:
         if ready["sources"] != lock:
             raise ValueError("Run host_setup.sh with this branch's pinned assets first")
         verify_prepared(self.p, lock)
+        config = recipe_config()
+        expected_samples, expected_history = dataset_dimensions(self.p)
+        # Dense caches retain FP32 14x14 observations plus four future groups.
+        # Original tensors and packed copies coexist; leave room for resume states.
+        raw_bytes = expected_samples * (config.tokens_per_block + config.future_tokens) * 1024 * 4
+        if not config.dense_decisions:
+            raw_bytes = 20 * 2**30  # conservative pinned v0 full50 cache budget
+        missing = (not self.p["features"].exists()) * raw_bytes
+        if flag("JEPA_PACK_FEATURES"):
+            missing += missing_packed_bytes(self.p["packed"], raw_bytes)
+        required = missing + 64 * 2**30
+        free = shutil.disk_usage(self.p["root"]).free
+        write_json(self.attempt / "storage.json", dict(free_bytes=free, required_bytes=required,
+                   estimated_cache_bytes=raw_bytes, packed=flag("JEPA_PACK_FEATURES")))
+        if free < required:
+            raise RuntimeError(f"Need {required / 2**30:.1f} GiB free shared storage for missing "
+                               "FP32 caches and checkpoints; disable packing with JEPA_PACK_FEATURES=0 if needed")
         # One writer across jobs sharing frozen assets. Readers validate committed manifests.
         with (self.p["root"] / ".cache_build.lock").open("w") as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
@@ -137,17 +168,33 @@ class Job:
                 if self.p["features"].parent.exists():
                     self.p["features"].parent.rename(self.p["root"] / f"history_features.incomplete.{time.time_ns()}")
                 self.command("visual_cache", [sys.executable, "-m", "scripts.cache_rmbench_history_features",
-                    "--cache-output", self.p["features"].parent, *base_args(self.p)], env=one_gpu_env())
-        args = parse_args([*base_args(self.p), "--history-feature-cache", str(self.p["features"]),
-                           "--output-dir", str(self.attempt / "data_check")])
-        data = RMBenchHistoryDataset(self.p["prepared"] / "manifest.json", args)
-        try:
-            if len(data) != 1013 or max(data.history_lengths) != 81 or data.selection["diagnostic_subset"]:
-                raise ValueError("Full50 history contract differs")
-            self.plan = schedule(len(data), self.world, self.plan["epochs"], self.plan["per_device_batch"])
-            write_json(self.attempt / "dataset.json", dict(selection=data.selection, provenance=data.provenance))
-        finally:
-            data.close()
+                    "--cache-output", self.p["features"].parent,
+                    "--encoder-batch-size", os.environ.get("JEPA_CACHE_ENCODER_BATCH", "4"),
+                    "--decode-episode", *base_args(self.p)], env=one_gpu_env())
+            args = parse_args([*base_args(self.p), "--history-feature-cache", str(self.p["features"]),
+                               "--output-dir", str(self.attempt / "data_check")])
+            data = RMBenchHistoryDataset(self.p["prepared"] / "manifest.json", args)
+            try:
+                if (len(data) != expected_samples or max(data.history_lengths) != expected_history
+                        or data.selection["diagnostic_subset"]):
+                    raise ValueError("Full50 history contract differs")
+                self.plan = schedule(len(data), self.world, self.plan["epochs"], self.plan["per_device_batch"])
+                write_json(self.attempt / "dataset.json", dict(selection=data.selection, provenance=data.provenance))
+            finally:
+                data.close()
+            if flag("JEPA_PACK_FEATURES"):
+                if not self.p["packed"].exists():
+                    self.command("pack_visual_cache", [sys.executable, "-m", "scripts.pack_rmbench_history_features",
+                        "--manifest", self.p["features"], "--output", self.p["packed"].parent], env=one_gpu_env())
+                packed = json.loads(self.p["packed"].read_text())
+                if packed.get("source_manifest_sha256") != sha256(self.p["features"]):
+                    raise ValueError("Packed cache belongs to another source manifest")
+        if flag("JEPA_WARM_OBSERVATIONS"):
+            if not flag("JEPA_PACK_FEATURES"):
+                raise ValueError("JEPA_WARM_OBSERVATIONS requires JEPA_PACK_FEATURES=1")
+            self.command("warm_observations", [sys.executable, "-m", "scripts.pack_rmbench_history_features",
+                "--manifest", self.p["features"], "--output", self.p["packed"].parent, "--warm-only"],
+                env=one_gpu_env())
 
     def sim_env(self):
         env = one_gpu_env()
@@ -215,6 +262,17 @@ class Job:
             for signum in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(signum, self.stop)
             try:
+                # Reject old sampling/run plans before expensive cache/GPU work.
+                plan_file = self.root / "plan.json"
+                if plan_file.exists() and json.loads(plan_file.read_text()) != self.plan:
+                    raise ValueError("Existing run uses a different plan; choose a new JEPA_RUN_NAME")
+                recipe_file = self.root / "recipe.json"
+                if recipe_file.exists() and json.loads(recipe_file.read_text()) != self.recipe:
+                    raise ValueError("Existing run uses a different recipe; choose a new JEPA_RUN_NAME")
+                if (not recipe_file.exists() and recipe_config().dense_decisions
+                        and (self.root / "train/resume_state.pt").exists()):
+                    raise ValueError("Existing run has no matching recipe metadata; choose a new JEPA_RUN_NAME")
+                write_json(recipe_file, self.recipe)
                 self.status("preflight")
                 self.command("revision", ["git", "rev-parse", "HEAD"])
                 self.command("working_tree", ["git", "diff", "--stat"])
@@ -233,7 +291,7 @@ class Job:
                     self.status("training_preflight")
                     stress = self.attempt / "longest_prefix"
                     self.command("longest_prefix", [*self.distributed(), "-m", "scripts.a1008.probe", "--mode", "stress",
-                        *base_args(self.p), "--history-feature-cache", self.p["features"], "--output-dir", stress])
+                        *base_args(self.p), *feature_args(self.p), "--output-dir", stress])
                     if self.args.train_only:
                         self.status("simulator_deferred", reason="Train-only: simulation checks and rollouts run on the host")
                     else:
@@ -246,19 +304,21 @@ class Job:
                         if not sim["native_expert_passed"] or not any(r["mode"] == "recorded_action_replay"
                                 and r["controller"] == "dense15" and r["success"] for r in sim["records"]):
                             raise ValueError("Native expert or recorded-action replay failed")
-                        self.evaluate(stress / "checkpoint_step000002.pt", self.attempt / "smoke_rollout", 1, True)
+                        self.evaluate(stress / "checkpoint_step000003.pt", self.attempt / "smoke_rollout", 1, True)
                     if self.args.preflight_only:
                         self.status("preflight_passed", formal_training_started=False,
                                     simulator_preflight="skipped" if self.args.train_only else "passed")
                         return
                     self.status("training")
                     command = [*self.distributed(), "scripts/train_vjepa_policy.py", *base_args(self.p),
-                        "--history-feature-cache", self.p["features"], "--output-dir", train,
+                        *feature_args(self.p), "--output-dir", train,
                         "--num-epochs", str(self.plan["epochs"]), "--max-steps", str(self.plan["updates"]),
                         "--gradient-accumulation-steps", str(self.plan["accumulation"]),
                         "--save-every", str(5 * self.plan["updates_per_epoch"]), "--save-training-state",
                         "--keep-last-checkpoints", "2", "--stop-file", self.root / "STOP", "--checkpoint-milestones",
-                        *[str(e * self.plan["updates_per_epoch"]) for e in (20, 50, self.plan["epochs"])]]
+                        *[str(e * self.plan["updates_per_epoch"])
+                          for e in sorted({e for e in (5, 10, 20, 50, self.plan["epochs"])
+                                           if e <= self.plan["epochs"]})]]
                     resume = train / "resume_state.pt"
                     if resume.exists():
                         command += ["--resume", resume]
@@ -310,9 +370,10 @@ def main():
     if args.plan:
         print(json.dumps(dict(plan=job.plan, output=str(job.root), train_only=args.train_only,
             evaluation="deferred_to_host" if args.train_only else "after_training",
+            recipe=job.recipe, packed=flag("JEPA_PACK_FEATURES"),
             language=dict(encoder=text_encoder(), context_length=128,
                           hidden_size=768 if text_encoder() == "bert" else 4096,
-                          model_version="v0_bert" if text_encoder() == "bert" else "v0"),
+                          model_version=recipe_config().model_version),
             paths={k: str(v) for k, v in job.p.items()}), indent=2))
     else:
         job.execute()

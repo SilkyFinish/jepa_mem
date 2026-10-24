@@ -194,6 +194,8 @@ def add_common_args(p):
     p.add_argument("--keep-last-checkpoints", type=int, default=0,
                    help="Keep this many recent weight exports (0 keeps all), plus milestone steps.")
     p.add_argument("--checkpoint-milestones", type=int, nargs="*", default=[])
+    p.add_argument("--stop-after-step", type=int,
+                   help="Save and exit at this absolute optimizer step, preserving the full --max-steps schedule.")
     p.add_argument("--save-initial-checkpoint", action="store_true",
                    help="Save step-zero weights for a matched untrained baseline.")
     p.add_argument("--wandb-project", default="vjepa_policy")
@@ -322,6 +324,9 @@ def build_dataset_collator(args, action_chunk_size, layout=None):
         dataset, custom_collator = build_dataset(
             args.dataset_factory, args, include_action=action_chunk_size is not None
         )
+        if getattr(args, "history_feature_packed", None):
+            from vjepa_policy.packed_history_features import prepare_packed_history
+            return prepare_packed_history(dataset, custom_collator, args)
         if custom_collator is not None:
             return dataset, custom_collator
         if layout is None:
@@ -470,6 +475,7 @@ def run_training(args, model, dataset, collator):
             "max_steps": args.max_steps,
             "stop_at": args.stop_at,
             "stop_file": args.stop_file,
+            "stop_after_step": getattr(args, "stop_after_step", None),
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "max_grad_norm": args.max_grad_norm,
             "mixed_precision": args.mixed_precision,

@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vjepa_policy.datasets.rmbench import CAMERAS, image_decoder, read_joint_vector
+from vjepa_policy.memory_config import FullHistoryV0Config
 from vjepa_policy.policy_serving.memory import MemoryPolicyServing, PROTOCOL
 from vjepa_policy.policy_serving.websocket import WebsocketPolicyServer
 
@@ -24,7 +25,7 @@ def checked(response):
 
 def reset_request(policy, instruction, sid="diagnostic"):
     return dict(op="reset", session_id=sid, request_id="reset", episode_id="native-replay",
-                instruction=instruction, protocol=PROTOCOL, sampling_config=policy.config.to_dict())
+                instruction=instruction, protocol=PROTOCOL, sampling_config=FullHistoryV0Config().to_dict())
 
 
 def read_blocks(manifest_path, episode_index, config):

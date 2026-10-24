@@ -191,7 +191,7 @@ class JobExecutionTests(LauncherTestCase):
                             ("--max-steps", "6300"), ("--save-every", "315")):
             self.assertEqual(option(command, flag), value)
         index = command.index("--checkpoint-milestones")
-        self.assertEqual(command[index + 1:index + 4], ["1260", "3150", "6300"])
+        self.assertEqual(command[index + 1:index + 6], ["315", "630", "1260", "3150", "6300"])
         self.assertEqual(self.status(job)["phase"], "complete")
         self.evaluate.assert_not_called()
 
@@ -218,7 +218,7 @@ class JobExecutionTests(LauncherTestCase):
         self.assertIn("simulator", self.commands)
         self.assertIn("training", self.commands)
         self.assertEqual(self.evaluate.call_args_list, [
-            call(job, job.attempt / "longest_prefix/checkpoint_step000002.pt",
+            call(job, job.attempt / "longest_prefix/checkpoint_step000003.pt",
                  job.attempt / "smoke_rollout", 1, True),
             call(job, job.root / "train/checkpoint_step006300.pt", job.attempt / "rollouts", 20),
         ])
@@ -237,7 +237,7 @@ class JobExecutionTests(LauncherTestCase):
         self.assertIn("simulator", self.commands)
         self.assertNotIn("training", self.commands)
         self.evaluate.assert_called_once_with(
-            job, job.attempt / "longest_prefix/checkpoint_step000002.pt",
+            job, job.attempt / "longest_prefix/checkpoint_step000003.pt",
             job.attempt / "smoke_rollout", 1, True)
         self.assertEqual(self.status(job)["phase"], "preflight_passed")
         self.assertIs(self.status(job)["train_only"], False)
@@ -290,6 +290,53 @@ class JobExecutionTests(LauncherTestCase):
             job.execute()
         self.assertEqual(self.status(job)["phase"], "failed")
         self.evaluate.assert_not_called()
+
+
+    def test_dense_full_bert_enables_optimizations_and_uses_new_cache_paths(self):
+        os.environ.update(JEPA_HISTORY_MODEL_VERSION="v2_full", JEPA_TEXT_ENCODER="bert",
+                          JEPA_HISTORY_BACKEND="flex", JEPA_SHARED_PREFIX="1",
+                          JEPA_ACTION_CHECKPOINTING="1", JEPA_PACK_FEATURES="1",
+                          JEPA_PER_DEVICE_BATCH="2", JEPA_EPOCHS="25")
+        job = self.new_job(train_only=True)
+        job.execute()
+        self.assertIn("attention_parity", self.commands)
+        self.assertEqual(option(self.commands["attention_parity"], "--mode"), "attention")
+        self.assertEqual(job.plan, common.schedule(17562, 8, 25, 2))
+        self.assertEqual(job.plan["updates"], 27425)
+        self.assertEqual(job.plan["updates_per_epoch"], 1097)
+        self.assertEqual(job.recipe["contract"]["model_version"], "v2_full_bert")
+        self.assertEqual(job.recipe["contract"]["history_spatial_pool"], 1)
+        self.assertIn("history_features_bert_v2", str(job.p["features"]))
+        self.assertIn("history_features_bert_v2_packed", str(job.p["packed"]))
+        for name in ("longest_prefix", "training"):
+            command = self.commands[name]
+            self.assertEqual(option(command, "--history-model-version"), "v2_full")
+            self.assertEqual(option(command, "--lang-dim"), "768")
+            self.assertEqual(option(command, "--history-attention-backend"), "flex")
+            self.assertEqual(option(command, "--history-feature-packed"), str(job.p["packed"]))
+            self.assertIn("--history-shared-prefix", command)
+            self.assertIn("--history-action-checkpointing", command)
+        self.assertEqual(option(self.commands["training"], "--gradient-accumulation-steps"), "1")
+
+    def test_dense_old_run_plan_is_rejected_before_allocating_gpu_work(self):
+        os.environ.update(JEPA_HISTORY_MODEL_VERSION="v2_full", JEPA_TEXT_ENCODER="bert")
+        job = self.new_job(train_only=True)
+        common.write_json(job.root / "plan.json", common.schedule(1013, 8, 100))
+        with self.assertRaisesRegex(ValueError, "different plan"):
+            job.execute()
+        self.cuda.device_count.assert_not_called()
+        self.caches.assert_not_called()
+
+    def test_dense_full_state_is_forwarded_only_from_its_own_run(self):
+        os.environ.update(JEPA_HISTORY_MODEL_VERSION="v2_full", JEPA_TEXT_ENCODER="bert",
+                          JEPA_PER_DEVICE_BATCH="2", JEPA_EPOCHS="25")
+        job = self.new_job(train_only=True)
+        resume = job.root / "train/resume_state.pt"
+        resume.parent.mkdir(parents=True)
+        resume.write_bytes(b"mock full-state; command forwarding only")
+        common.write_json(job.root / "recipe.json", job.recipe)
+        job.execute()
+        self.assertEqual(option(self.commands["training"], "--resume"), str(resume))
 
 
 class CachePlanTests(unittest.TestCase):

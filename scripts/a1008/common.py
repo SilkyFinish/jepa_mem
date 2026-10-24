@@ -1,5 +1,8 @@
 """Small standard-library helpers shared by preparation and node jobs."""
 import hashlib
+import importlib.util
+from functools import lru_cache
+import sys
 import json
 import os
 from pathlib import Path
@@ -53,19 +56,87 @@ def asset_sources():
     return lock
 
 
+def flag(name, default="0"):
+    value = os.environ.get(name, default)
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1")
+    return value == "1"
+
+
+@lru_cache(maxsize=1)
+def _contracts():
+    # Planning/host preparation stays stdlib-only: importing vjepa_policy's
+    # package initializer would load torch before any hardware checks.
+    spec = importlib.util.spec_from_file_location(
+        "_a1008_memory_config", REPO / "src/vjepa_policy/memory_config.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def recipe_config():
+    return _contracts().full_history_config(
+        os.environ.get("JEPA_HISTORY_MODEL_VERSION", "v0"), text_encoder())
+
+
+def dataset_dimensions(p):
+    config = recipe_config()
+    manifest = p["prepared"] / "manifest.json"
+    if not manifest.exists():
+        # Plan-only before host preparation: pinned full50 release.
+        return (17562, 92) if config.dense_decisions else (1013, 81)
+    rows = json.loads(manifest.read_text())["episodes"]
+    decisions = [config.decision_steps(row["frames"]) for row in rows]
+    return sum(map(len, decisions)), max(
+        len(config.observed_steps(ds[-1])) for ds in decisions if ds)
+
+
+def feature_args(p):
+    args = ["--history-feature-cache", str(p["features"])]
+    if flag("JEPA_PACK_FEATURES"):
+        args += ["--history-feature-packed", str(p["packed"])]
+    return args
+
+
+def missing_packed_bytes(manifest, expected_bytes):
+    """Credit only committed episode shards; the packer validates their identity."""
+    manifest = Path(manifest)
+    if manifest.exists():
+        return 0
+    committed = 0
+    for marker in manifest.parent.glob("episode*/complete.json"):
+        for kind in ("observations", "targets"):
+            path = marker.parent / (kind + ".npy")
+            if path.is_file():
+                committed += path.stat().st_size
+    return max(0, expected_bytes - committed)
+
+
 def paths():
     root = Path(os.environ["JEPA_SHARED_ROOT"]).resolve(strict=True)
     bert = text_encoder() == "bert"
+    name = "history_features_bert" if bert else "history_features"
+    if recipe_config().dense_decisions:
+        name += "_v2"
     return dict(root=root, data=root / "dataset/demo_clean/put_back_block/aloha_agilex",
                 prepared=root / "prepared/full50", text=root / ("text_cache_bert" if bert else "text_cache"),
                 text_model=root / "weights" / ("bert-base-uncased" if bert else "t5-v1_1-xxl"),
                 ready=root / ("assets_ready_bert.json" if bert else "assets_ready.json"),
                 encoder=root / "weights/vjepa2_1_vitl_dist_vitG_384.pt",
-                features=root / ("history_features_bert" if bert else "history_features") / "manifest.json")
+                features=root / name / "manifest.json",
+                packed=root / (name + "_packed") / "manifest.json")
 
 
 def base_args(p):
+    recipe_config()
+    extra = []
+    if flag("JEPA_SHARED_PREFIX"):
+        extra.append("--history-shared-prefix")
+    if flag("JEPA_ACTION_CHECKPOINTING"):
+        extra.append("--history-action-checkpointing")
     return ["--policy-arch", "full_history", "--text-encoder", text_encoder(),
+            "--history-model-version", os.environ.get("JEPA_HISTORY_MODEL_VERSION", "v0"),
             "--lang-dim", "768" if text_encoder() == "bert" else "4096", "--checkpoint", str(p["encoder"]),
             "--dataset-dirs", str(p["prepared"]), "--dataset-stats", str(p["prepared"] / "dataset_stats.json"),
             "--text-cache-dir", str(p["text"]), "--action-normalization", "QUANTILE",
@@ -73,10 +144,11 @@ def base_args(p):
             "--pred-num-heads", "16", "--action-hidden-size", "512", "--action-num-layers", "24",
             "--condition-num-heads", "8", "--use-activation-checkpointing",
             "--activation-checkpointing-blocks", os.environ.get("JEPA_CHECKPOINT_BLOCKS", "24"),
-            "--history-attention-backend", "segmented", "--batch-size", str(per_device_batch()),
+            "--history-attention-backend", os.environ.get("JEPA_HISTORY_BACKEND", "segmented"),
+            "--batch-size", str(per_device_batch()),
             "--mixed-precision", "bf16",
             "--lr", "1e-4", "--weight-decay", "0.01", "--seed", "7", "--log-every", "1",
-            "--num-workers", os.environ.get("JEPA_NUM_WORKERS", "2"), "--prefetch-factor", "2"]
+            "--num-workers", os.environ.get("JEPA_NUM_WORKERS", "2"), "--prefetch-factor", "2", *extra]
 
 
 def schedule(samples, world, epochs, per_device_batch=1):

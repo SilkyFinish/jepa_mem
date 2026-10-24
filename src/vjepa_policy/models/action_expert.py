@@ -86,8 +86,11 @@ class PredictorKVActionAttention(nn.Module):
             batch_size, action_length, self.num_heads, self.head_dim
         ).transpose(1, 2)
         if memory:
-            query = apply_3d_rope(query, action_position_coords, **rope_options)
-            action_key = apply_3d_rope(action_key, action_position_coords, **rope_options)
+            if memory_attention_plan is not None and hasattr(memory_attention_plan, "rotate"):
+                query, action_key = memory_attention_plan.rotate(query, action_key)
+            else:
+                query = apply_3d_rope(query, action_position_coords, **rope_options)
+                action_key = apply_3d_rope(action_key, action_position_coords, **rope_options)
         key = torch.cat((context_key, action_key), dim=2)
         value = torch.cat((context_value, action_value), dim=2)
         if memory and memory_attention_plan is not None:

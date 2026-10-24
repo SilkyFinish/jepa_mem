@@ -13,4 +13,8 @@ if [[ "$JEPA_TRAIN_ONLY" != 1 ]]; then
     exit 2
   fi
 fi
-exec "$POLICY_PYTHON" -u -m scripts.a1008.job "$@"
+forwarded=()
+for option in "$@"; do
+  if [[ "$option" != --dense-full ]]; then forwarded+=("$option"); fi
+done
+exec "$POLICY_PYTHON" -u -m scripts.a1008.job "${forwarded[@]}"

@@ -86,6 +86,10 @@ def parse_args(argv=None):
     preliminary = parser.parse_args(argv)
     if preliminary.policy_arch == "full_history":
         set_history_defaults(parser, preliminary.text_encoder)
+        if preliminary.history_model_version in ("v2", "v2_full"):
+            parser.set_defaults(require_full_future_window=False)
+    elif preliminary.history_model_version != "v0":
+        parser.error("--history-model-version requires --policy-arch full_history")
     return parser.parse_args(argv)
 
 
@@ -406,6 +410,7 @@ def main(
         )
     if full_history:
         predictor_kwargs["attention_backend"] = args.history_attention_backend
+        predictor_kwargs["history_spatial_pool"] = history_config.history_pool_size
     predictor = predictor_builder(**predictor_kwargs)
     policy_kwargs = dict(
         action_dim=args.action_dim,
@@ -534,7 +539,11 @@ def main(
         if getattr(dataset, "batch_schema", None) != policy_caps.batch_schema:
             raise ValueError("History policy requires the history dataset/collator contract")
         if args.history_attention_backend == "dense":
-            validate_reference_capacity(dataset, args.batch_size)
+            validate_reference_capacity(dataset, args.batch_size, history_config)
+        model.action_expert.checkpoint_memory_blocks = args.history_action_checkpointing
+        model.share_history_prefixes = args.history_shared_prefix
+        dataset.share_history_prefixes = args.history_shared_prefix
+        dataset.provenance["shared_history_sampling"] = args.history_shared_prefix
         model.training_data_provenance = dataset.provenance
     run_training(args, model, dataset, collator)
 
