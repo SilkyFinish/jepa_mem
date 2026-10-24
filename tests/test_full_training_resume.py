@@ -1,4 +1,5 @@
 """Actual AdamW continuation: weights, moments, RNG, data cursor and retention."""
+import gc
 import importlib.util
 import os
 from pathlib import Path
@@ -84,3 +85,8 @@ class FullStateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "same data"):
                 Trainer(tiny_model(), Data(), lambda samples: samples[0],
                         cfg=dict(first_cfg, resume_from=str(resume_path), max_steps=8))
+            # Release mmap-backed optimizer tensors before NTFS/FUSE cleanup.
+            for trainer in (continuous, first, resumed):
+                trainer.accelerator.free_memory()
+            del trainer, continuous, first, resumed
+            gc.collect()

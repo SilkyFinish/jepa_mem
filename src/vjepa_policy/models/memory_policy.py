@@ -135,6 +135,15 @@ class FullHistoryVJEPAPolicy(nn.Module):
             encoded = torch.cat(pieces)
             latents = encoded.new_zeros(batch_size, blocks, patches, width)
             latents[valid] = encoded
+        index = batch.get("history_latent_index")
+        if index is not None:
+            if ("history_latents" not in batch or index.shape != valid.shape or index.dtype != torch.long
+                    or latents.ndim != 3 or latents.shape[1:] != (patches, width)
+                    or index.device != latents.device or (index < 0).any() or (index >= len(latents)).any()):
+                raise ValueError("Invalid compact observation tensor/index")
+            if not latents.is_floating_point() or not torch.isfinite(latents).all():
+                raise ValueError("Compact observation features must be finite floating point")
+            return latents
         if latents.shape != (batch_size, blocks, patches, width):
             raise ValueError("history_latents must match [B,K,P,D_encoder]")
         if not latents.is_floating_point() or not torch.isfinite(latents[valid]).all():
@@ -173,8 +182,10 @@ class FullHistoryVJEPAPolicy(nn.Module):
             from .shared_history import encode_shared_history
             history = encode_shared_history(self.predictor, z, packed_history, language,
                                             batch["language_mask"], ends, valid, batch["decision_step"],
-                                            self.config)
+                                            self.config, latent_index=batch.get("history_latent_index"))
         else:
+            if "history_latent_index" in batch:
+                z = z[batch["history_latent_index"]].masked_fill(~valid[..., None, None], 0)
             history = self.predictor.forward_history(z, packed_history, language, batch["language_mask"], hl)
         return history, packed_current, language, z.dtype
 

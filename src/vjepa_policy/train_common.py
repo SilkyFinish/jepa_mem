@@ -324,6 +324,9 @@ def build_dataset_collator(args, action_chunk_size, layout=None):
         dataset, custom_collator = build_dataset(
             args.dataset_factory, args, include_action=action_chunk_size is not None
         )
+        if getattr(args, "history_feature_packed", None):
+            from vjepa_policy.packed_history_features import prepare_packed_history
+            return prepare_packed_history(dataset, custom_collator, args)
         if custom_collator is not None:
             return dataset, custom_collator
         if layout is None:

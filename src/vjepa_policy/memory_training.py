@@ -9,6 +9,9 @@ def add_history_args(parser):
     parser.add_argument("--history-model-version", choices=("v0", "v1", "v2"), default="v0",
                         help="v0: full spatial history; v1: 2x2 pooling; v2: v1 with every-frame training decisions")
     parser.add_argument("--history-feature-cache", help="Frozen observation/target cache manifest")
+    parser.add_argument("--history-feature-packed", help="Lossless packed storage index for the same frozen cache")
+    parser.add_argument("--history-feature-warm-observations", action="store_true",
+                        help="Single-process only: warm observations; with torchrun use the packer --warm-only first")
     parser.add_argument("--history-action-checkpointing", action="store_true",
                         help="Recompute temporary action-attention KV concatenations during backward")
     parser.add_argument("--history-shared-prefix", action="store_true",
@@ -59,6 +62,8 @@ def validate_history_args(args):
             raise ValueError(f"Full-History v0 does not support {name}")
     if args.dataset_factory != HISTORY_FACTORY:
         raise ValueError(f"Full-History v0 requires --dataset-factory {HISTORY_FACTORY}")
+    if getattr(args, "history_feature_packed", None) and not args.history_feature_cache:
+        raise ValueError("--history-feature-packed requires the original --history-feature-cache manifest")
     if args.history_encoder_batch_size < 1 or args.history_bucket_size < 0:
         raise ValueError("Invalid history encoding batch size or bucket size")
     if args.max_history_blocks is not None and args.max_history_blocks < 1:
